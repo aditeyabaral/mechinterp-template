@@ -1,10 +1,18 @@
-"""Build and push a character-level arithmetic tokenizer to HF Hub.
+"""Build and push a character-level tokenizer to the HF Hub.
 
-Uses a fixed WordLevel vocabulary covering all arithmetic characters:
-digits (0-9), operators (+, -, *, /, %, $), equals (=), newline, and 4 special tokens.
+This builds a deterministic, training-free WordLevel tokenizer that maps each
+character in `VOCAB_CHARS` to its own token. This pattern is useful for small
+from-scratch models on synthetic tasks where the input alphabet is small and fixed.
 
-The vocabulary is deterministic and requires no training data, making it
-reusable across all model families and dataset configs.
+TODO (you must implement this for your task):
+  1. `VOCAB_CHARS`  -- every character that can appear in a prompt or answer.
+  2. `SAMPLE_TEXTS` -- a few representative strings for the round-trip sanity
+     checks at the bottom of this script.
+
+The HF Hub repo to push to is passed via --hub-name on the command line.
+
+See the commented-out example below, taken from the operator-overloading
+arithmetic study this template was derived from.
 """
 
 import argparse
@@ -15,13 +23,29 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Split
 from transformers import PreTrainedTokenizerFast
 
+# --------------------------------------------------------------------------- #
+# TODO: fill these in for your task.
+# --------------------------------------------------------------------------- #
+
+# Example (arithmetic study):
+# VOCAB_CHARS = sorted("0123456789$+-*/%=\n")
+# SAMPLE_TEXTS = [
+#     "2+3=5\n",
+#     "12+34=46\n",
+#     "9*1=9\n4*1=4\n2*4=8\n6*4=24\n5*6=30\n1*8=8\n9*8=72\n9*8=72\n9*0=",
+# ]
+
+VOCAB_CHARS: list[str] = []
+SAMPLE_TEXTS: list[str] = []
+
+# --------------------------------------------------------------------------- #
+
 _SPECIAL_TOKENS = ["<pad>", "<bos>", "<eos>", "<unk>"]
-_CHARS = sorted("0123456789$+-*/%=\n")
-_VOCAB = {tok: i for i, tok in enumerate(_SPECIAL_TOKENS + _CHARS)}
+_VOCAB = {tok: i for i, tok in enumerate(_SPECIAL_TOKENS + VOCAB_CHARS)}
 
 
 def build_tokenizer() -> PreTrainedTokenizerFast:
-    """Build a fixed character-level tokenizer for arithmetic expressions."""
+    """Build a deterministic character-level tokenizer over VOCAB_CHARS."""
     tok_obj = Tokenizer(WordLevel(vocab=_VOCAB, unk_token="<unk>"))
     tok_obj.pre_tokenizer = Split(pattern=Regex(r"[\s\S]"), behavior="isolated")
     tok_obj.decoder = Fuse()
@@ -35,14 +59,20 @@ def build_tokenizer() -> PreTrainedTokenizerFast:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build and push arithmetic tokenizer to HF Hub")
+    parser = argparse.ArgumentParser(description="Build and push a character-level tokenizer to the HF Hub")
     parser.add_argument(
         "--hub-name",
         type=str,
-        default="arithmetic-circuit-overloading/tokenizer-full",
-        help="HF Hub repo to push the tokenizer to",
+        required=True,
+        help="HF Hub repo to push the tokenizer to (e.g. your-username/your-project-tokenizer)",
     )
     args = parser.parse_args()
+
+    if not VOCAB_CHARS or not SAMPLE_TEXTS:
+        raise ValueError(
+            "VOCAB_CHARS and SAMPLE_TEXTS are not set. "
+            "Fill these in for your task -- see the module docstring for an example."
+        )
 
     tokenizer = build_tokenizer()
     vocab = tokenizer.get_vocab()
@@ -52,7 +82,7 @@ if __name__ == "__main__":
     for token, idx in sorted(vocab.items(), key=lambda x: x[1]):
         print(f"  {idx:2d}: {repr(token)}")
 
-    expected_vocab_size = len(_SPECIAL_TOKENS) + len(_CHARS)
+    expected_vocab_size = len(_SPECIAL_TOKENS) + len(VOCAB_CHARS)
     assert len(tokenizer) == expected_vocab_size, f"Expected {expected_vocab_size} tokens, got {len(tokenizer)}"
 
     # Special token IDs match _SPECIAL_TOKENS insertion order
@@ -61,92 +91,33 @@ if __name__ == "__main__":
     assert tokenizer.eos_token_id == 2, f"eos_token_id={tokenizer.eos_token_id}, expected 2"
     assert vocab["<unk>"] == 3, f"unk id={vocab['<unk>']}, expected 3"
 
-    # pad and eos must be distinct (otherwise DataCollator masks out EOS during training)
+    # pad and eos must be distinct, otherwise DataCollatorForLanguageModeling masks out EOS during training
     assert tokenizer.pad_token_id != tokenizer.eos_token_id, "pad_token_id must differ from eos_token_id"
 
     # All token IDs are within [0, vocab_size)
     assert max(vocab.values()) == len(tokenizer) - 1, "Token IDs are not contiguous"
 
-    # Every arithmetic character has its own entry and no two chars share an ID
-    char_ids = [vocab[c] for c in _CHARS]
-    assert len(char_ids) == len(set(char_ids)), "Duplicate IDs among arithmetic characters"
+    # Every vocab character has its own entry and no two characters share an ID
+    char_ids = [vocab[c] for c in VOCAB_CHARS]
+    assert len(char_ids) == len(set(char_ids)), "Duplicate IDs among vocab characters"
 
     print("\nVocabulary assertions passed.")
 
-    # Per-expression tokenization
-    # (text, expected_tokens)
-    tests = [
-        # Standard arithmetic
-        ("2+3=5\n", ["2", "+", "3", "=", "5", "\n"]),
-        ("7*8=56\n", ["7", "*", "8", "=", "5", "6", "\n"]),
-        ("5-9=-4\n", ["5", "-", "9", "=", "-", "4", "\n"]),
-        ("0*0=0\n", ["0", "*", "0", "=", "0", "\n"]),
-        # Division, modulo, and concatenation
-        ("8/2=4\n", ["8", "/", "2", "=", "4", "\n"]),
-        ("7%3=1\n", ["7", "%", "3", "=", "1", "\n"]),
-        ("9/3=3\n", ["9", "/", "3", "=", "3", "\n"]),
-        ("10%4=2\n", ["1", "0", "%", "4", "=", "2", "\n"]),
-        ("3$4=34\n", ["3", "$", "4", "=", "3", "4", "\n"]),
-        ("12$5=125\n", ["1", "2", "$", "5", "=", "1", "2", "5", "\n"]),
-        ("0$9=09\n", ["0", "$", "9", "=", "0", "9", "\n"]),
-        # Multi-digit operands and results
-        ("99+1=100\n", ["9", "9", "+", "1", "=", "1", "0", "0", "\n"]),
-        ("5-9=-4\n", ["5", "-", "9", "=", "-", "4", "\n"]),
-        # Two-digit operands
-        ("12+34=46\n", ["1", "2", "+", "3", "4", "=", "4", "6", "\n"]),
-        ("50-27=23\n", ["5", "0", "-", "2", "7", "=", "2", "3", "\n"]),
-        ("11*11=121\n", ["1", "1", "*", "1", "1", "=", "1", "2", "1", "\n"]),
-        ("84/12=7\n", ["8", "4", "/", "1", "2", "=", "7", "\n"]),
-        ("99%10=9\n", ["9", "9", "%", "1", "0", "=", "9", "\n"]),
-        # Three-digit operands / results
-        ("100+200=300\n", ["1", "0", "0", "+", "2", "0", "0", "=", "3", "0", "0", "\n"]),
-        ("500-123=377\n", ["5", "0", "0", "-", "1", "2", "3", "=", "3", "7", "7", "\n"]),
-        ("123*4=492\n", ["1", "2", "3", "*", "4", "=", "4", "9", "2", "\n"]),
-        ("999/3=333\n", ["9", "9", "9", "/", "3", "=", "3", "3", "3", "\n"]),
-        ("256%100=56\n", ["2", "5", "6", "%", "1", "0", "0", "=", "5", "6", "\n"]),
-        # Negative results with multi-digit numbers
-        ("10-99=-89\n", ["1", "0", "-", "9", "9", "=", "-", "8", "9", "\n"]),
-        ("100-999=-899\n", ["1", "0", "0", "-", "9", "9", "9", "=", "-", "8", "9", "9", "\n"]),
-    ]
-
+    # Round-trip sanity checks on SAMPLE_TEXTS. For a character-level
+    # tokenizer, each token should be exactly one input character.
     print("\nSanity checks:")
-    for text, expected_tokens in tests:
+    for text in SAMPLE_TEXTS:
         ids = tokenizer.encode(text, add_special_tokens=False)
         tokens = tokenizer.convert_ids_to_tokens(ids)
+        print(f"  {text!r:16s} -> {tokens}")
 
-        print(f"  {repr(text):16s} -> {tokens}")
-
-        assert tokens == expected_tokens, (
-            f"Tokenization mismatch for {repr(text)}:\n  expected: {expected_tokens}\n  got:      {tokens}"
+        assert tokens == list(text), (
+            f"Tokenization mismatch for {text!r}:\n  expected: {list(text)}\n  got:      {tokens}"
         )
-        # Round-trip correctness
         decoded = tokenizer.decode(ids, skip_special_tokens=True)
-        assert decoded == text, (
-            f"Round-trip mismatch for {repr(text)}:\n  expected: {repr(text)}\n  got:      {repr(decoded)}"
-        )
-        # No unknown tokens
-        assert tokenizer.unk_token_id not in ids, f"Unknown token in encoding of {repr(text)}: ids={ids}"
-        # Every token ID is within bounds
-        assert all(0 <= i < len(tokenizer) for i in ids), (
-            f"Out-of-bounds token ID in encoding of {repr(text)}: ids={ids}"
-        )
-
-    # Full prompt test — mirrors an actual training example (8-shot, question only, no answer)
-    full_prompt = "9*1=9\n4*1=4\n2*4=8\n6*4=24\n5*6=30\n1*8=8\n9*8=72\n9*8=72\n9*0="
-    prompt_ids = tokenizer.encode(full_prompt, add_special_tokens=False)
-    prompt_tokens = tokenizer.convert_ids_to_tokens(prompt_ids)
-
-    print(f"\nFull prompt ({len(prompt_ids)} tokens):")
-    print(f"  {prompt_tokens}")
-
-    # Since every character maps 1:1 to a token, expected tokens == list(full_prompt)
-    assert prompt_tokens == list(full_prompt), (
-        f"Full prompt tokenization mismatch:\n  expected: {list(full_prompt)}\n  got:      {prompt_tokens}"
-    )
-    assert tokenizer.unk_token_id not in prompt_ids, "Unknown token in full prompt"
-    assert all(0 <= i < len(tokenizer) for i in prompt_ids), "Out-of-bounds token ID in full prompt"
-    # Prompt ends with "=" (no newline) — last token should be "="
-    assert prompt_tokens[-1] == "=", f"Last token should be '=', got {repr(prompt_tokens[-1])}"
+        assert decoded == text, f"Round-trip mismatch for {text!r}:\n  expected: {text!r}\n  got:      {decoded!r}"
+        assert tokenizer.unk_token_id not in ids, f"Unknown token in encoding of {text!r}: ids={ids}"
+        assert all(0 <= i < len(tokenizer) for i in ids), f"Out-of-bounds token ID in encoding of {text!r}: ids={ids}"
 
     print("\nAll tokenization assertions passed.")
 

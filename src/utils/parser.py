@@ -1,20 +1,27 @@
-"""Parser utilities for adding inference arguments."""
+"""Command-line arguments for the inference / activation-extraction entry point (src/main.py).
+
+The generic run arguments (model, layers, output, ...) are provided as-is. Add any
+task-specific arguments your prompts or analysis need in the marked TODO section;
+the operator-overloading arithmetic study's arguments are kept below as a commented
+example.
+"""
 
 import argparse
 
 
 def add_arguments(parser: argparse.ArgumentParser) -> None:
-    """Add command-line arguments for inference to the parser.
+    """Add inference command-line arguments to the parser.
 
     Args:
         parser: The argument parser to add arguments to.
     """
+    # --- Generic run arguments (useful for most analysis runs) ---
     parser.add_argument(
         "--model-path",
         "-m",
         type=str,
         required=True,
-        help="The path to the model on Huggingface or the local path to the model.",
+        help="HuggingFace repo or local path to the model.",
     )
     parser.add_argument(
         "--quantize",
@@ -35,28 +42,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "-p",
         default=1000,
         type=int,
-        help="The number of examples to evaluate on. Defaults to 1000.",
-    )
-    parser.add_argument(
-        "--few-shot-examples",
-        "-fs",
-        type=int,
-        required=True,
-        help="The number of few-shot examples to use.",
-    )
-    parser.add_argument(
-        "--operator",
-        "-o",
-        type=str,
-        required=True,
-        help="The operator to use in the equation.",
-    )
-    parser.add_argument(
-        "--overloading-operator",
-        "-oo",
-        type=str,
-        required=False,
-        help="The overloading operator to use in the equation.",
+        help="Number of prompts to evaluate on. Defaults to 1000.",
     )
     parser.add_argument(
         "--max-new-tokens",
@@ -64,39 +50,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         required=False,
         default=200,
-        help="The maximum number of new tokens to generate. Defaults to 200.",
+        help="Maximum number of new tokens to generate. Defaults to 200.",
     )
     parser.add_argument(
         "--output",
         "-out",
         type=str,
-        help="Directory where the output .pt file will be saved. Filename is auto-generated from run parameters.",
-    )
-    parser.add_argument(
-        "--max-digits",
-        "-md",
-        type=int,
-        required=False,
-        default=1,
-        help="Maximum number of digits per operand when generating prompts. Defaults to 1.",
-    )
-    parser.add_argument(
-        "--reverse",
-        "-rv",
-        action="store_true",
-        help="Use reverse-digit answer format (LSD-first), matching models trained with --reverse.",
-    )
-    parser.add_argument(
-        "--pad-zero",
-        action="store_true",
-        help="Pad operands with leading zeros up to `--max-digits` when generating prompts; answers remain unpadded.",
-    )
-    parser.add_argument(
-        "--intervention",
-        type=str,
-        required=False,
-        default=None,
-        help="Path to analysis.json. When provided, runs individual neuron ablations after the baseline.",
+        help="Directory where the output file will be saved.",
     )
     parser.add_argument(
         "--seed",
@@ -104,10 +64,44 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         required=False,
         default=42,
-        help="The seed to use for reproducibility. Defaults to 42.",
+        help="Random seed for reproducibility. Defaults to 42.",
     )
+
+    # --- Core mechinterp toggles (capture + intervention) ---
+    # The flags are generic; their specifics are defined by your inference code:
+    #   - what activations / token positions --capture-geometry records, and
+    #   - the file format the --intervention spec is read from.
     parser.add_argument(
         "--capture-geometry",
         action="store_true",
-        help="Capture MLP neuron, attention head, and geometry activations. Omit for intervention/ablation runs to reduce file size.",
+        help="Capture detailed per-position activations (MLP neurons, attention heads, residual stream) "
+        "in addition to the model output. Omit for lightweight runs such as large ablation sweeps.",
     )
+    parser.add_argument(
+        "--intervention",
+        type=str,
+        default=None,
+        help="Path to an intervention spec (e.g. a JSON listing neurons/heads to ablate or patch). "
+        "When provided, an intervention pass is run after the baseline.",
+    )
+
+    # ----------------------------------------------------------------------- #
+    # TODO: add task-specific arguments for your study here.
+    # ----------------------------------------------------------------------- #
+    #
+    # Example (operator-overloading arithmetic study):
+    #
+    #     parser.add_argument("--operator", "-o", type=str, required=True,
+    #                         help="The operator to use in the equation.")
+    #     parser.add_argument("--overloading-operator", "-oo", type=str, required=False,
+    #                         help="The overloading operator to use in the equation.")
+    #     parser.add_argument("--few-shot-examples", "-fs", type=int, required=True,
+    #                         help="Number of few-shot examples per prompt.")
+    #     parser.add_argument("--max-digits", "-md", type=int, default=1,
+    #                         help="Maximum number of digits per operand.")
+    #     parser.add_argument("--reverse", "-rv", action="store_true",
+    #                         help="Use reverse-digit answer format (LSD-first).")
+    #     parser.add_argument("--pad-zero", action="store_true",
+    #                         help="Pad operands with leading zeros up to --max-digits.")
+    #
+    # ----------------------------------------------------------------------- #

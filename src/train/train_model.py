@@ -1,10 +1,15 @@
-"""Train a small LM from scratch on arithmetic circuit overloading data.
+"""Train a small LM from scratch on a synthetic dataset, then push it to the HF Hub.
 
-Architecture is inherited directly from the base model's config (default: Llama 3.3 70B).
-Only the size parameters (hidden_size, num_hidden_layers, etc.) are overridden.
+Uses a GPT-2 architecture; only the size parameters (n_embd, n_layer, n_head, ...)
+are configurable, so you get a tiny randomly-initialised model.
 
-Loads a pre-built tokenizer from HF Hub (see train_tokenizer.py) and trains the model
-on the specified dataset config, then pushes both to the same HF Hub repo.
+Loads a pre-built tokenizer from the HF Hub (see train_tokenizer.py) and trains on
+a dataset with "prompt" and "answer" columns (see create_dataset.py), then pushes
+the trained model to the HF Hub.
+
+Evaluation is done by greedy generation + exact-match accuracy on the "answer"
+column. If your task needs finer-grained metrics (per-category accuracy, etc.),
+see the commented example inside GenerationEvalTrainer.evaluate.
 """
 
 import argparse
@@ -16,13 +21,30 @@ import wandb
 from datasets import Dataset, load_dataset
 from tqdm.auto import tqdm
 from transformers import (
-    AutoConfig,
     AutoModelForCausalLM,
     AutoTokenizer,
     DataCollatorForLanguageModeling,
+    GPT2Config,
     Trainer,
     TrainingArguments,
 )
+
+# --------------------------------------------------------------------------- #
+# TODO: fill these in for your task.
+# --------------------------------------------------------------------------- #
+
+# HF Hub repo holding your trained tokenizer (see train_tokenizer.py).
+# Example: TOKENIZER_NAME = "your-username/your-project-tokenizer"
+TOKENIZER_NAME: str = ""
+
+# HF Hub dataset repo with train/validation splits (see create_dataset.py).
+# Example: DATASET_NAME = "your-username/your-dataset-name"
+DATASET_NAME: str = ""
+
+# Dataset config/subset name, or None if the dataset has a single default config.
+DATASET_CONFIG: str | None = None
+
+# --------------------------------------------------------------------------- #
 
 
 def run_inference_batch(
@@ -47,8 +69,21 @@ def run_inference_batch(
     return completions
 
 
-class ArithmeticTrainer(Trainer):
-    """Trainer subclass that replaces the default eval loop with generation-based accuracy metrics."""
+class GenerationEvalTrainer(Trainer):
+    """Trainer that replaces the default eval loop with generation-based exact-match accuracy.
+
+    The eval dataset is expected to be the raw (untokenized) validation set with
+    "prompt" and "answer" columns. For each prompt the model greedily generates a
+    completion, which is compared for exact string equality against "answer".
+    """
+
+    def __init__(
+        self, *args: object, eval_batch_size: int = 128, eval_max_new_tokens: int = 16, **kwargs: object
+    ) -> None:
+        """Store eval-time generation settings, then defer to the base Trainer."""
+        super().__init__(*args, **kwargs)
+        self.eval_batch_size = eval_batch_size
+        self.eval_max_new_tokens = eval_max_new_tokens
 
     def evaluate(
         self,
@@ -56,7 +91,8 @@ class ArithmeticTrainer(Trainer):
         ignore_keys: list[str] | None = None,
         metric_key_prefix: str = "eval",
     ) -> dict[str, float]:
-        """Run greedy generation on the validation set and return standard/overloaded accuracy."""
+        """Run greedy generation on the validation set and return exact-match accuracy."""
+        eval_dataset = eval_dataset if eval_dataset is not None else self.eval_dataset
         was_training = self.model.training
         self.model.eval()
         original_padding_side = self.processing_class.padding_side
@@ -64,25 +100,40 @@ class ArithmeticTrainer(Trainer):
 
         try:
             results = []
-            for i in tqdm(range(0, len(raw_val), args.batch_size), desc="Evaluating"):
-                batch = raw_val[i : i + args.batch_size]
-                predictions = run_inference_batch(self.model, self.processing_class, batch["prompt"])
+            for i in tqdm(range(0, len(eval_dataset), self.eval_batch_size), desc="Evaluating"):
+                batch = eval_dataset[i : i + self.eval_batch_size]
+                predictions = run_inference_batch(
+                    self.model, self.processing_class, batch["prompt"], self.eval_max_new_tokens
+                )
                 for j, predicted in enumerate(predictions):
-                    example = {k: batch[k][j] for k in batch}
-                    results.append({**example, "predicted": predicted, "correct": predicted == example["answer"]})
+                    results.append({"predicted": predicted, "answer": batch["answer"][j]})
 
-            standard = [r for r in results if r["base_operation"] == r["target_operation"]]
-            overloaded = [r for r in results if r["base_operation"] != r["target_operation"]]
+            accuracy = sum(r["predicted"] == r["answer"] for r in results) / len(results)
+            metrics = {f"{metric_key_prefix}_accuracy": accuracy}
 
-            metrics = {
-                f"{metric_key_prefix}_overall_accuracy": sum(r["correct"] for r in results) / len(results),
-                f"{metric_key_prefix}_standard_accuracy": sum(r["correct"] for r in standard) / len(standard)
-                if standard
-                else float("nan"),
-                f"{metric_key_prefix}_overloaded_accuracy": sum(r["correct"] for r in overloaded) / len(overloaded)
-                if overloaded
-                else float("nan"),
-            }
+            # ------------------------------------------------------------------- #
+            # Optional: per-category accuracy breakdown.
+            # ------------------------------------------------------------------- #
+            # If your val rows carry extra category columns, you can report finer
+            # metrics. Example from the operator-overloading study, where rows have
+            # "base_operation" and "target_operation" columns and a row is
+            # "overloaded" when they differ:
+            #
+            #     for j, predicted in enumerate(predictions):
+            #         results[-len(predictions) + j].update(
+            #             base_operation=batch["base_operation"][j],
+            #             target_operation=batch["target_operation"][j],
+            #         )
+            #     standard = [r for r in results if r["base_operation"] == r["target_operation"]]
+            #     overloaded = [r for r in results if r["base_operation"] != r["target_operation"]]
+            #     metrics[f"{metric_key_prefix}_standard_accuracy"] = (
+            #         sum(r["predicted"] == r["answer"] for r in standard) / len(standard) if standard else float("nan")
+            #     )
+            #     metrics[f"{metric_key_prefix}_overloaded_accuracy"] = (
+            #         sum(r["predicted"] == r["answer"] for r in overloaded) / len(overloaded)
+            #         if overloaded else float("nan")
+            #     )
+            # ------------------------------------------------------------------- #
 
             self.log(metrics)
             self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, metrics)
@@ -94,50 +145,16 @@ class ArithmeticTrainer(Trainer):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a model on arithmetic expressions")
+    parser = argparse.ArgumentParser(description="Train a small LM from scratch on a synthetic dataset")
 
-    # Tokenizer
+    # Model size (GPT-2 config attribute names)
+    parser.add_argument("--hidden-size", type=int, default=256, help="Hidden size (GPT-2 n_embd)")
+    parser.add_argument("--num-hidden-layers", type=int, default=4, help="Number of transformer layers (GPT-2 n_layer)")
+    parser.add_argument("--num-attention-heads", type=int, default=4, help="Number of attention heads (GPT-2 n_head)")
+    parser.add_argument("--intermediate-size", type=int, default=1024, help="MLP/FFN inner size (GPT-2 n_inner)")
     parser.add_argument(
-        "--tokenizer-name",
-        type=str,
-        default="arithmetic-circuit-overloading/tokenizer-full",
-        help="HF Hub repo to load the tokenizer from (see train_tokenizer.py)",
+        "--max-position-embeddings", type=int, default=256, help="Max sequence length (GPT-2 n_positions)"
     )
-
-    # Architecture
-    parser.add_argument(
-        "--base-model",
-        type=str,
-        default="meta-llama/Llama-3.3-70B-Instruct",
-        help="Base model to inherit architecture config from (only size params are overridden)",
-    )
-
-    # Dataset
-    parser.add_argument(
-        "--dataset-name",
-        type=str,
-        required=True,
-        help="HF Hub dataset repo",
-    )
-    parser.add_argument(
-        "--dataset-config",
-        type=str,
-        default="99",
-        help="Dataset config/subset to train the model on (e.g. '100', '99', '95')",
-    )
-
-    # Model size
-    parser.add_argument("--hidden-size", type=int, default=256, help="Dimension of hidden representations")
-    parser.add_argument("--num-hidden-layers", type=int, default=4, help="Number of transformer decoder layers")
-    parser.add_argument("--num-attention-heads", type=int, default=4, help="Number of attention heads per layer")
-    parser.add_argument(
-        "--num-key-value-heads",
-        type=int,
-        default=None,
-        help="Number of KV heads for GQA (default: same as --num-attention-heads, i.e. MHA); must divide evenly",
-    )
-    parser.add_argument("--intermediate-size", type=int, default=1024, help="Dimension of the MLP representations")
-    parser.add_argument("--max-position-embeddings", type=int, default=256, help="Maximum sequence length")
 
     # Hub + Training
     parser.add_argument(
@@ -152,6 +169,7 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--num-epochs", type=int, default=5, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size per device for train and eval")
+    parser.add_argument("--eval-max-new-tokens", type=int, default=16, help="Max tokens to generate per eval prompt")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="Peak learning rate")
     parser.add_argument("--warmup-ratio", type=float, default=0.05, help="Fraction of steps used for LR warmup")
     parser.add_argument("--weight-decay", type=float, default=0.01, help="AdamW weight decay")
@@ -176,6 +194,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    if not TOKENIZER_NAME or not DATASET_NAME:
+        raise ValueError(
+            "TOKENIZER_NAME and DATASET_NAME are not set. Fill these in at the top of this script for your task."
+        )
+
     hub_name = args.hub_name
 
     # Reproducibility
@@ -188,8 +211,8 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Tokenizer
-    print(f"Loading tokenizer from '{args.tokenizer_name}'...")
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_name)
+    print(f"Loading tokenizer from '{TOKENIZER_NAME}'...")
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_NAME)
 
     print(f"Tokenizer vocab size : {len(tokenizer)}")
     print(f"  max token ID       : {max(tokenizer.get_vocab().values())}")
@@ -197,19 +220,18 @@ if __name__ == "__main__":
     print(f"  bos_token_id       : {tokenizer.bos_token_id}")
     print(f"  eos_token_id       : {tokenizer.eos_token_id}")
 
-    # Config
-    # Load config as-is, then override only the size parameters.
-    config = AutoConfig.from_pretrained(args.base_model)
-    config.vocab_size = len(tokenizer)
-    config.hidden_size = args.hidden_size
-    config.intermediate_size = args.intermediate_size
-    config.num_hidden_layers = args.num_hidden_layers
-    config.num_attention_heads = args.num_attention_heads
-    config.num_key_value_heads = args.num_key_value_heads or args.num_attention_heads
-    config.max_position_embeddings = args.max_position_embeddings
-    config.pad_token_id = tokenizer.pad_token_id
-    config.bos_token_id = tokenizer.bos_token_id
-    config.eos_token_id = tokenizer.eos_token_id
+    # Config -- a GPT-2 architecture sized down to the values below.
+    config = GPT2Config(
+        vocab_size=len(tokenizer),
+        n_embd=args.hidden_size,
+        n_inner=args.intermediate_size,
+        n_layer=args.num_hidden_layers,
+        n_head=args.num_attention_heads,
+        n_positions=args.max_position_embeddings,
+        pad_token_id=tokenizer.pad_token_id,
+        bos_token_id=tokenizer.bos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
 
     # Model
     model = AutoModelForCausalLM.from_config(config)
@@ -221,26 +243,22 @@ if __name__ == "__main__":
     print(f"Seed:   {args.seed}\n")
 
     print("Model Configuration:")
-    print(f"  vocab_size:              {config.vocab_size}")
-    print(f"  hidden_size:             {config.hidden_size}")
-    print(f"  intermediate_size:       {config.intermediate_size}")
-    print(f"  num_hidden_layers:       {config.num_hidden_layers}")
-    print(f"  num_attention_heads:     {config.num_attention_heads}")
-    print(f"  num_key_value_heads:     {config.num_key_value_heads}")
-    print(f"  max_position_embeddings: {config.max_position_embeddings}")
+    print(f"  vocab_size:    {config.vocab_size}")
+    print(f"  n_embd:        {config.n_embd}")
+    print(f"  n_inner:       {config.n_inner}")
+    print(f"  n_layer:       {config.n_layer}")
+    print(f"  n_head:        {config.n_head}")
+    print(f"  n_positions:   {config.n_positions}")
     print(f"Total parameters: {total_params / 1e6:.2f}M")
     print(f"Model size (fp32): ~{total_params * 4 / 1e9:.2f} GB")
 
     # Dataset
-    print(f"\nLoading dataset '{args.dataset_name}' (config: {args.dataset_config})...")
-    raw_train = load_dataset(args.dataset_name, args.dataset_config, split="train")
-    raw_val = load_dataset(args.dataset_name, args.dataset_config, split="validation")
+    print(f"\nLoading dataset '{DATASET_NAME}' (config: {DATASET_CONFIG})...")
+    raw_train = load_dataset(DATASET_NAME, DATASET_CONFIG, split="train")
+    raw_val = load_dataset(DATASET_NAME, DATASET_CONFIG, split="validation")
 
-    # TODO: add support to set how many FS examples.
-    # This currently directly uses the prompt which has all examples.
-    # We need to extract N FS examples and prepend to question for training text.
     def tokenize(batch: dict) -> dict:
-        """Concatenate prompt and answer, then tokenize."""
+        """Concatenate prompt and answer, append EOS, then tokenize."""
         texts = [p + a + tokenizer.eos_token for p, a in zip(batch["prompt"], batch["answer"])]
         return tokenizer(texts, truncation=True, max_length=args.max_position_embeddings)
 
@@ -269,7 +287,7 @@ if __name__ == "__main__":
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_overloaded_accuracy",
+        metric_for_best_model="eval_accuracy",
         greater_is_better=True,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
@@ -282,13 +300,15 @@ if __name__ == "__main__":
         bf16=supports_bf16,
     )
 
-    trainer = ArithmeticTrainer(
+    trainer = GenerationEvalTrainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_train,
         eval_dataset=raw_val,
         data_collator=collator,
         processing_class=tokenizer,
+        eval_batch_size=args.batch_size,
+        eval_max_new_tokens=args.eval_max_new_tokens,
     )
 
     print("\nStarting training...")
@@ -305,13 +325,5 @@ if __name__ == "__main__":
         print(f"  {metric}: {value}")
 
     if wandb.run is not None:
-        wandb.run.summary["val/overall_accuracy"] = metrics["eval_overall_accuracy"]
-        wandb.run.summary["val/standard_accuracy"] = metrics["eval_standard_accuracy"]
-        wandb.run.summary["val/overloaded_accuracy"] = metrics["eval_overloaded_accuracy"]
-        wandb.run.summary["val/n_standard"] = len([r for r in raw_val if r["base_operation"] == r["target_operation"]])
-        wandb.run.summary["val/n_overloaded"] = len(
-            [r for r in raw_val if r["base_operation"] != r["target_operation"]]
-        )
-        wandb.run.summary["val/n_neurons"] = args.num_hidden_layers * (
-            args.intermediate_size + args.num_attention_heads
-        )
+        wandb.run.summary["val/accuracy"] = metrics["eval_accuracy"]
+        wandb.run.summary["val/n_examples"] = len(raw_val)

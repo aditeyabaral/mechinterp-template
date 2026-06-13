@@ -114,18 +114,16 @@ class GenerationEvalTrainer(Trainer):
             # ------------------------------------------------------------------- #
             # Optional: per-category accuracy breakdown.
             # ------------------------------------------------------------------- #
-            # If your val rows carry extra category columns, you can report finer
-            # metrics. Example from the operator-overloading study, where rows have
-            # "base_operation" and "target_operation" columns and a row is
-            # "overloaded" when they differ:
+            # `results` is in the same order as `eval_dataset`, so you can split it
+            # by any category column on the val rows. This block is drop-in: paste
+            # it right here. Example from the operator-overloading study, where rows
+            # carry "base_operation"/"target_operation" and a row is "overloaded"
+            # when they differ:
             #
-            #     for j, predicted in enumerate(predictions):
-            #         results[-len(predictions) + j].update(
-            #             base_operation=batch["base_operation"][j],
-            #             target_operation=batch["target_operation"][j],
-            #         )
-            #     standard = [r for r in results if r["base_operation"] == r["target_operation"]]
-            #     overloaded = [r for r in results if r["base_operation"] != r["target_operation"]]
+            #     base = eval_dataset["base_operation"]
+            #     target = eval_dataset["target_operation"]
+            #     standard = [r for k, r in enumerate(results) if base[k] == target[k]]
+            #     overloaded = [r for k, r in enumerate(results) if base[k] != target[k]]
             #     metrics[f"{metric_key_prefix}_standard_accuracy"] = (
             #         sum(r["predicted"] == r["answer"] for r in standard) / len(standard) if standard else float("nan")
             #     )

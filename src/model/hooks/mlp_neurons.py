@@ -5,28 +5,28 @@ import torch.nn as nn
 
 
 class MlpNeuronExtractionStore:
-    """Captures the intermediate MLP activations (input to down_proj) per layer.
+    """Captures the intermediate MLP activations (input to the neuron-projection module) per layer.
 
-    In LlamaMLP: down_proj(act_fn(gate_proj(x)) * up_proj(x))
-    The input to down_proj is the intermediate neuron activation tensor,
-    shape [B, seq_len, intermediate_size]. These are the "neurons" we analyse.
+    In GPT-2's MLP: c_proj(act_fn(c_fc(x))). The input to c_proj is the intermediate
+    neuron activation tensor, shape [B, seq_len, intermediate_size]. These are the
+    "neurons" we analyse.
 
-    Registers a forward pre-hook on each layer's mlp.down_proj.
+    Registers a forward pre-hook on each layer's neuron-projection module.
     """
 
-    def __init__(self, named_down_proj_layers: dict[int, nn.Module]) -> None:
+    def __init__(self, named_c_proj_layers: dict[int, nn.Module]) -> None:
         """Initialise the store and register hooks.
 
         Args:
-            named_down_proj_layers: dict mapping layer index to the layer's mlp.down_proj module.
+            named_c_proj_layers: dict mapping layer index to the layer's MLP neuron-projection module.
         """
         self.activations: dict[int, list[torch.Tensor]] = {}
         self.handles: dict[int, torch.utils.hooks.RemovableHandle] = {}
 
-        for idx, layer in named_down_proj_layers.items():
+        for idx, layer in named_c_proj_layers.items():
             self._register_layer(idx, layer)
 
-    def _register_layer(self, layer_idx: int, down_proj: nn.Module) -> None:
+    def _register_layer(self, layer_idx: int, c_proj: nn.Module) -> None:
         def _pre_hook_fn(module: nn.Module, args: tuple, layer_idx: int = layer_idx) -> tuple:
             intermediate = args[0]  # [B, seq_len, intermediate_size]
             if layer_idx not in self.activations:
@@ -34,7 +34,7 @@ class MlpNeuronExtractionStore:
             self.activations[layer_idx].append(intermediate.detach().clone().cpu())
             return args
 
-        handle = down_proj.register_forward_pre_hook(_pre_hook_fn)
+        handle = c_proj.register_forward_pre_hook(_pre_hook_fn)
         self.handles[layer_idx] = handle
 
     def get_layer_neurons(self, layer_idx: int) -> list[torch.Tensor]:
@@ -65,15 +65,16 @@ class MlpNeuronExtractionStore:
 class MlpNeuronAblationHook:
     """Ablates specific MLP neurons by zeroing their intermediate activations.
 
-    Registers a forward pre-hook on a single layer's mlp.down_proj that sets
-    the specified neuron indices to 0.0 before the down projection.
+    Registers a forward pre-hook on a single layer's MLP neuron-projection module
+    (GPT-2: mlp.c_proj) that sets the specified neuron indices to 0.0 before that
+    projection.
     """
 
-    def __init__(self, down_proj: nn.Module, neuron_indices: list[int]) -> None:
+    def __init__(self, c_proj: nn.Module, neuron_indices: list[int]) -> None:
         """Register the ablation hook.
 
         Args:
-            down_proj: The mlp.down_proj module to hook into.
+            c_proj: The MLP neuron-projection module (GPT-2: mlp.c_proj) to hook into.
             neuron_indices: Indices of neurons to zero out in the intermediate activation.
         """
         self.neuron_indices = neuron_indices
@@ -83,7 +84,7 @@ class MlpNeuronAblationHook:
             intermediate[:, :, neuron_indices] = 0.0
             return (intermediate,) + args[1:]
 
-        self.handle = down_proj.register_forward_pre_hook(_pre_hook_fn)
+        self.handle = c_proj.register_forward_pre_hook(_pre_hook_fn)
 
     def remove(self) -> None:
         """Remove the hook."""

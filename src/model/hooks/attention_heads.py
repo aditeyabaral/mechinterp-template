@@ -5,25 +5,26 @@ import torch.nn as nn
 
 
 class AttentionHeadExtractionStore:
-    """Captures per-head attention outputs (input to o_proj) per layer.
+    """Captures per-head attention outputs (input to the attention output projection) per layer.
 
-    In LlamaAttention, the concatenated head outputs have shape
-    [B, seq_len, num_heads * head_dim] just before o_proj. We reshape to
-    [B, seq_len, num_heads, head_dim] to expose individual head outputs.
+    The concatenated head outputs have shape [B, seq_len, num_heads * head_dim]
+    just before the output projection (GPT-2: attn.c_proj).
+    We reshape to [B, seq_len, num_heads, head_dim] to expose individual head outputs.
 
-    Registers a forward pre-hook on each layer's self_attn.o_proj.
+    Registers a forward pre-hook on each layer's attention output-projection module.
     """
 
     def __init__(
         self,
-        named_o_proj_layers: dict[int, nn.Module],
+        named_c_proj_layers: dict[int, nn.Module],
         num_heads: int,
         head_dim: int,
     ) -> None:
         """Initialise the store and register hooks.
 
         Args:
-            named_o_proj_layers: dict mapping layer index to the layer's self_attn.o_proj module.
+            named_c_proj_layers: dict mapping layer index to the layer's attention output-projection
+                module (GPT-2: attn.c_proj).
             num_heads: Number of attention heads.
             head_dim: Dimension of each attention head (hidden_size // num_heads).
         """
@@ -32,10 +33,10 @@ class AttentionHeadExtractionStore:
         self.activations: dict[int, list[torch.Tensor]] = {}
         self.handles: dict[int, torch.utils.hooks.RemovableHandle] = {}
 
-        for idx, layer in named_o_proj_layers.items():
+        for idx, layer in named_c_proj_layers.items():
             self._register_layer(idx, layer)
 
-    def _register_layer(self, layer_idx: int, o_proj: nn.Module) -> None:
+    def _register_layer(self, layer_idx: int, c_proj: nn.Module) -> None:
         def _pre_hook_fn(module: nn.Module, args: tuple, layer_idx: int = layer_idx) -> tuple:
             concat_heads = args[0]  # [batch, seq_len, num_heads * head_dim]
             batch, seq_len, _ = concat_heads.shape
@@ -45,7 +46,7 @@ class AttentionHeadExtractionStore:
             self.activations[layer_idx].append(per_head.detach().clone().cpu())
             return args
 
-        handle = o_proj.register_forward_pre_hook(_pre_hook_fn)
+        handle = c_proj.register_forward_pre_hook(_pre_hook_fn)
         self.handles[layer_idx] = handle
 
     def get_layer_heads(self, layer_idx: int) -> list[torch.Tensor]:
@@ -74,15 +75,16 @@ class AttentionHeadExtractionStore:
 
 
 class AttentionHeadAblationHook:
-    """Ablates specific attention heads by zeroing their outputs before o_proj.
+    """Ablates specific attention heads by zeroing their outputs before the output projection.
 
-    Registers a forward pre-hook on a single layer's self_attn.o_proj that sets
-    the specified head outputs (all head_dim dimensions) to 0.0.
+    Registers a forward pre-hook on a single layer's attention output-projection
+    module (GPT-2: attn.c_proj) that sets the specified head outputs (all head_dim
+    dimensions) to 0.0.
     """
 
     def __init__(
         self,
-        o_proj: nn.Module,
+        c_proj: nn.Module,
         head_indices: list[int],
         num_heads: int,
         head_dim: int,
@@ -90,7 +92,7 @@ class AttentionHeadAblationHook:
         """Register the ablation hook.
 
         Args:
-            o_proj: The self_attn.o_proj module to hook into.
+            c_proj: The attention output-projection module (GPT-2: attn.c_proj) to hook into.
             head_indices: Indices of heads to zero out.
             num_heads: Total number of attention heads.
             head_dim: Dimension of each head.
@@ -107,7 +109,7 @@ class AttentionHeadAblationHook:
             new_concat = per_head.reshape(batch, seq_len, hidden)
             return (new_concat,) + args[1:]
 
-        self.handle = o_proj.register_forward_pre_hook(_pre_hook_fn)
+        self.handle = c_proj.register_forward_pre_hook(_pre_hook_fn)
 
     def remove(self) -> None:
         """Remove the hook."""

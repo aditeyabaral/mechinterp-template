@@ -1,4 +1,20 @@
-"""Module defining a generic Large Language Model (LLM) class with methods for generation and intervention."""
+"""Wrapper around a GPT-2 LM exposing generation and activation extraction/intervention hooks.
+
+This wrapper navigates a GPT-2 module tree (the architecture trained by
+src/train/train_model.py) via four architecture-specific accessors:
+
+    | what                    | GPT-2 module           |
+    | ----------------------- | ---------------------- |
+    | decoder blocks          | model.transformer.h    |
+    | MLP neuron projection   | block.mlp.c_proj       |
+    | attention output proj   | block.attn.c_proj      |
+    | token embeddings        | model.transformer.wte  |
+
+The "MLP neuron projection" and "attention output projection" are the modules
+whose *input* is, respectively, the MLP intermediate activations (the "neurons")
+and the concatenated per-head attention outputs. The hooks attach to those inputs.
+The rest of the class and all of the hooks in model/hooks are architecture-agnostic.
+"""
 
 import torch
 import torch.nn as nn
@@ -9,9 +25,7 @@ from .hooks import MultiLayerActivationStore
 
 
 class LargeLanguageModel:
-    """A generic Large-Language Model (LLM) class to serve as the base class for different models."""
-
-    PROMPT_TEMPLATE_SMALL_LM = "{}\n{}="
+    """A generic wrapper exposing a decoder-only LM's layers for extraction and intervention."""
 
     def __init__(
         self,
@@ -34,64 +48,87 @@ class LargeLanguageModel:
         )
         self.model.eval()
 
+    def _decoder_blocks(self) -> list[nn.Module]:
+        """Return the list of decoder block modules (architecture-specific; GPT-2: transformer.h)."""
+        return list(self.model.transformer.h)
+
     def get_layers(self, layers: list[int] | None) -> dict[int, nn.Module]:
-        """Get the layers to extract and patch activations into.
+        """Get the decoder block modules to extract and patch activations into.
 
         Args:
             layers (Optional[list[int]]): list of layer indices to extract and patch. If None, all layers are returned.
 
         Returns:
-            dict[int, nn.Module]: A dictionary of layer idx: layer module pairs for the specified layers.
+            dict[int, nn.Module]: A dictionary of layer idx: block module pairs for the specified layers.
         """
-        all_layers = list(self.model.model.layers)
+        all_layers = self._decoder_blocks()
         if layers is None:
             layers = list(range(len(all_layers)))
         return {i: all_layers[i] for i in layers}
 
-    def get_mlp_down_proj_layers(self, layers: list[int] | None = None) -> dict[int, nn.Module]:
-        """Get the mlp.down_proj modules for specified layers.
+    def get_mlp_neuron_layers(self, layers: list[int] | None = None) -> dict[int, nn.Module]:
+        """Get the MLP neuron-projection modules for specified layers (GPT-2: mlp.c_proj).
 
-        The input to down_proj is the MLP intermediate activation (the "neurons").
+        The input to this module is the MLP intermediate activation (the "neurons").
 
         Args:
             layers: List of layer indices. If None, all layers are returned.
 
         Returns:
-            dict mapping layer index to the layer's mlp.down_proj module.
+            dict mapping layer index to the layer's MLP neuron-projection module.
         """
-        all_layers = list(self.model.model.layers)
+        all_layers = self._decoder_blocks()
         if layers is None:
             layers = list(range(len(all_layers)))
-        return {i: all_layers[i].mlp.down_proj for i in layers}
+        return {i: all_layers[i].mlp.c_proj for i in layers}
 
     def get_embedding_layer(self) -> nn.Module:
-        """Get the token embedding layer (embed_tokens).
+        """Get the token embedding module (GPT-2: transformer.wte).
 
-        Returns the output of embed_tokens, which is the representation after
-        token embedding and before any transformer block processes it.
-        For LLaMA-style models, positional information (RoPE) is applied inside
-        each attention layer, so this is purely the token embedding.
+        Its output is the representation after token embedding and before any
+        transformer block processes it. In GPT-2 positional embeddings are added
+        separately (transformer.wpe), so this is purely the token embedding.
 
         Returns:
-            The embed_tokens module.
+            The token embedding module.
         """
-        return self.model.model.embed_tokens
+        return self.model.transformer.wte
 
-    def get_attn_o_proj_layers(self, layers: list[int] | None = None) -> dict[int, nn.Module]:
-        """Get the self_attn.o_proj modules for specified layers.
+    def extract_token_embeddings(self, prompt: str) -> tuple[Tensor, Tensor]:
+        """Look up the token embeddings for a prompt straight from the embedding layer.
 
-        The input to o_proj is the concatenated per-head attention outputs.
+        This is a pure embedding lookup (transformer.wte): the pre-transformer
+        representation of each token, before any block (or the positional embedding)
+        processes it. No generation or forward pass through the transformer blocks
+        is performed.
+
+        Args:
+            prompt (str): The input text to embed.
+
+        Returns:
+            token_ids (Tensor): LongTensor [seq_len] of input token IDs.
+            embeddings (Tensor): FloatTensor [seq_len, hidden_size] of token embeddings.
+        """
+        input_ids = self.tokenizer(prompt, return_tensors="pt")["input_ids"].to(self.device)  # [1, seq_len]
+        with torch.no_grad():
+            embeddings = self.get_embedding_layer()(input_ids)  # [1, seq_len, hidden_size]
+        return input_ids.squeeze(0).detach().cpu(), embeddings.squeeze(0).detach().cpu()
+
+    def get_attn_output_layers(self, layers: list[int] | None = None) -> dict[int, nn.Module]:
+        """Get the attention output-projection modules for specified layers (GPT-2: attn.c_proj).
+
+        The input to this module is the concatenated per-head attention outputs.
 
         Args:
             layers: List of layer indices. If None, all layers are returned.
 
         Returns:
-            dict mapping layer index to the layer's self_attn.o_proj module.
+            dict mapping layer index to the layer's attention output-projection module.
         """
-        all_layers = list(self.model.model.layers)
+        all_layers = self._decoder_blocks()
         if layers is None:
             layers = list(range(len(all_layers)))
-        return {i: all_layers[i].self_attn.o_proj for i in layers}
+        return {i: all_layers[i].attn.c_proj for i in layers}
 
     @property
     def num_attention_heads(self) -> int:
@@ -195,7 +232,7 @@ class LargeLanguageModel:
         prompt: str,
         layers: dict[int, nn.Module],
         max_new_tokens: int = 50,
-    ) -> tuple[dict[int, list[Tensor]], str, str, Tensor, dict, Tensor]:
+    ) -> dict[str, object]:
         """Run a forward pass on the given prompt and store activations from specified layers.
 
         Args:
@@ -204,11 +241,13 @@ class LargeLanguageModel:
             max_new_tokens (int): Tokens to generate.
 
         Returns:
-            MultiLayerActivationStore: A store containing activations for the given prompt
-            str: The generated response from the model.
-            str: The entire completion from the generated response.
-            Tensor: The logits of the generated tokens.
-            Tensor: The output ids of the generated tokens.
+            dict with keys:
+                "activations":    dict[int, list[Tensor]] per-layer activations from generation.
+                "generated_text": str full decoded text (prompt + completion).
+                "completion":     str generated completion only.
+                "logits":         Tensor [seq_len_generated, vocab_size] per-token logits.
+                "attentions":     dict[int, list[Tensor]] attention weights per layer.
+                "output_ids":     Tensor [prompt_len + seq_len_generated] token IDs.
         """
         store = MultiLayerActivationStore(layers)
         generated_text, completion, logits, attentions, output_ids = self.generate(
@@ -217,11 +256,52 @@ class LargeLanguageModel:
         activations = dict(store.activations)
         store.remove_all_hooks()
         store.clear()
-        return (
-            activations,
-            generated_text,
-            completion,
-            logits,
-            attentions,
-            output_ids,
-        )
+        return {
+            "activations": activations,
+            "generated_text": generated_text,
+            "completion": completion,
+            "logits": logits,
+            "attentions": attentions,
+            "output_ids": output_ids,
+        }
+
+    def extract(
+        self,
+        prompt: str,
+        layers: dict[int, nn.Module],
+        max_new_tokens: int = 50,
+    ) -> dict[str, object]:
+        """Run residual-stream activation extraction and token-embedding extraction together.
+
+        Convenience wrapper that combines extract_activations (per-layer activations
+        captured during generation) with extract_token_embeddings (the static token
+        embeddings for the prompt), returning everything in a single dict.
+
+        Args:
+            prompt (str): The prompt to run the model on.
+            layers (dict[int, nn.Module]): The decoder blocks to extract activations from.
+            max_new_tokens (int): Tokens to generate.
+
+        Returns:
+            dict with keys:
+                "activations":    dict[int, list[Tensor]] per-layer activations from generation.
+                "embeddings":     Tensor [prompt_len, hidden_size] prompt token embeddings.
+                "token_ids":      Tensor [prompt_len] prompt token IDs (for the embeddings).
+                "generated_text": str full decoded text (prompt + completion).
+                "completion":     str generated completion only.
+                "logits":         Tensor [seq_len_generated, vocab_size] per-token logits.
+                "attentions":     dict[int, list[Tensor]] attention weights per layer.
+                "output_ids":     Tensor [prompt_len + seq_len_generated] token IDs.
+        """
+        result = self.extract_activations(prompt, layers, max_new_tokens=max_new_tokens)
+        token_ids, embeddings = self.extract_token_embeddings(prompt)
+        return {
+            "activations": result["activations"],
+            "embeddings": embeddings,
+            "token_ids": token_ids,
+            "generated_text": result["generated_text"],
+            "completion": result["completion"],
+            "logits": result["logits"],
+            "attentions": result["attentions"],
+            "output_ids": result["output_ids"],
+        }

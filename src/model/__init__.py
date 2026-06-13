@@ -1,4 +1,4 @@
-"""LLM package for arithmetic heuristics."""
+"""Model wrapper exposing a decoder-only LM for activation extraction and intervention."""
 
 from .llm import LargeLanguageModel
 

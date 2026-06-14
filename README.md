@@ -18,7 +18,10 @@ models such a good interpretability playground.
 > is to get you reliably to that starting line.
 
 Everything generic already works; the task-specific parts are left as clearly marked `TODO`s for you
-to fill in. The template is built around **GPT-2**, the smallest, best-studied open architecture in this field.
+to fill in. The template is built around **GPT-2**, the smallest, best-studied open architecture in
+this field, and uses [**TransformerLens**](https://github.com/TransformerLensOrg/TransformerLens) to
+read and edit the model's internals — so the same analysis code runs on GPT-2 or any toy model you
+train, just by changing `--model-path`.
 
 This README assumes you've seen the transformer architecture once (you roughly know what "attention"
 and "layers" are) but are **new to interpretability**. It defines every concept you need.
@@ -103,8 +106,11 @@ definitions, just enough to follow along:
 - **Token embedding** — the raw vector a token starts as, before any block processes it (we store this
   under layer index `-1`).
 
-- **Hook** — a small function PyTorch calls whenever a module runs. We attach hooks to read out
-  activations (without changing anything) or to edit them.
+- **Hook** — a small function the model calls whenever a particular activation is computed. We use
+  [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens) hooks to read out
+  activations (without changing anything) or to edit them — e.g. to zero out a neuron. Each
+  activation has a stable *name* (like `blocks.5.mlp.hook_post`), so the same code works on any
+  supported model.
 
 - **Ablation** — an intervention where we force some activations (a neuron or a head) to **zero** and
   see if the output changes. If it does, that component mattered — this is our causal test.
@@ -199,12 +205,7 @@ src/
     train_tokenizer.py   #   build a character-level tokenizer            [fill in vocab]
     create_dataset.py    #   generate a synthetic training dataset        [fill in build_dataset]
     train_model.py       #   train a small GPT-2 and push it to the Hub   [fill in repo names]
-  model/
-    llm.py               # LargeLanguageModel: loads the model; does generation + extraction
-    hooks/               # the forward-hook machinery (generic; you will NOT need to edit this)
-      extraction.py        #   capture residual-stream activations
-      mlp_neurons.py       #   capture / ablate MLP neurons
-      attention_heads.py   #   capture / ablate attention heads
+  model.py               # load_model(): boots the model into a TransformerLens bridge (generic)
   utils/
     dataset.py           # PromptDataset: the probe prompts you run            [fill in — required]
     parser.py            # command-line arguments for main.py                  [optional extra args]
@@ -316,9 +317,10 @@ committed to its answer, so that position's residual stream is the most informat
 look. All four recorded tensors (residual, MLP neurons, attention heads, embedding) are read at this
 *same* position, so they always describe the same token.
 
-> Practical note: a token's activations only exist once the model has processed it, on the *next*
-> generation step. So keep a little headroom in `--max-new-tokens` (the default 200 is plenty) — if
-> the answer were the very last token generated, its activations wouldn't have been computed.
+> How this works under the hood: after generating, we run the *whole* output sequence (prompt +
+> generation) back through the model in a single pass and read its activation cache. Because that one
+> pass covers every position, the answer's last token always has its activations computed — there's no
+> "ran out of tokens" edge case to worry about, whatever `--max-new-tokens` you choose.
 
 Which substring counts as "the answer" is decided by `find_answer_span` in `src/inference.py`. The
 default grabs the first whitespace-delimited chunk of the generation; override it for your task.
@@ -435,10 +437,14 @@ learning, because you control and understand the task completely.)
 
 ## Using a non-GPT-2 model
 
-The only architecture-specific code is four small accessor methods in `src/model/llm.py` (the decoder
-blocks, the MLP down-projection, the attention output-projection, and the token embedding). Point
-those at another decoder-only model's module names and the entire rest of the template — hooks,
-capture loop, analysis — carries over unchanged.
+There is **no architecture-specific code to edit**. The model is loaded through
+[TransformerLens](https://github.com/TransformerLensOrg/TransformerLens)'s `TransformerBridge`
+(`src/model.py`), which wraps any supported decoder-only HuggingFace model and re-exposes it with
+*uniform* hook names (`blocks.{i}.hook_resid_post`, `blocks.{i}.mlp.hook_post`,
+`blocks.{i}.attn.hook_z`, `hook_embed`). The capture loop and ablation code in `src/inference.py`
+reference only those names, so switching models is just a matter of pointing `--model-path` at a
+different Hub repo or local directory — the bridge reads the new model's config and `cfg.n_layers /
+n_heads / d_head` update automatically.
 
 ---
 

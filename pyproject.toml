@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "accelerate>=1.11.0",
-    "bitsandbytes>=0.48.1; sys_platform != 'darwin' or platform_machine != 'arm64'",
     "datasets>=4.5.0",
     "huggingface-hub>=0.35.3",
     "jupyter>=1.1.1",
@@ -14,11 +13,12 @@ dependencies = [
     "protobuf>=6.33.1",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
-    "torch>=2.6.0",
+    "torch>=2.6.0,<2.10",
     "transformers>=4.57.1",
     "wandb>=0.25.0",
     "pytest>=9.0.2",
     "rich>=14.3.3",
+    "transformer-lens>=3.2.1",
 ]
 
 [project.optional-dependencies]

@@ -24,12 +24,6 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="HuggingFace repo or local path to the model.",
     )
     parser.add_argument(
-        "--quantize",
-        "-q",
-        action="store_true",
-        help="Enable 4-bit quantization using BitsAndBytes.",
-    )
-    parser.add_argument(
         "--layers",
         "-l",
         nargs="+",

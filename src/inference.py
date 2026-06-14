@@ -1,28 +1,37 @@
-"""Inference loop capturing MLP intermediate neuron activations and per-head attention outputs.
+"""Inference loop: generate on each prompt and capture / ablate internal activations via TransformerLens.
 
-This file works on any decoder-only model out of the box. Two functions are the task-specific
+This file works on any decoder-only model out of the box (it talks to the model only through the
+TransformerLens `TransformerBridge` from src/model.py). Two functions are the task-specific
 override points you may want to customise (both have sensible defaults and `TODO` markers):
-  - find_answer_span(generated_text):       which span of the generation is "the answer".
-  - find_positions_of_interest(tok, prompt): which prompt token positions to capture for geometry.
-Everything else (the capture stores, ablation hooks, and the run loop) is task-agnostic.
+  - find_answer_span(generated_text):        which span of the generation is "the answer".
+  - find_positions_of_interest(model, prompt): which prompt token positions to capture for geometry.
+Everything else (the capture, ablation hooks, and the run loop) is task-agnostic.
+
+HOW CAPTURE AND ABLATION WORK HERE (the TransformerLens idea):
+    Instead of hand-writing PyTorch forward hooks per architecture, we name the activation we want
+    with a TransformerLens "hook name" and let the library do the rest. Two calls cover everything:
+      - model.run_with_cache(tokens) -> (logits, cache): runs the model once and hands back a
+        `cache` you can index by hook name to read EVERY layer/position activation. We use:
+            blocks.{l}.hook_resid_post   residual stream after block l   [batch, pos, d_model]
+            blocks.{l}.mlp.hook_post     MLP intermediate "neurons"      [batch, pos, d_mlp]
+            blocks.{l}.attn.hook_z       per-head attention output       [batch, pos, n_heads, d_head]
+            hook_embed                   token embedding (pre-block 0)   [batch, pos, d_model]
+      - model.run_with_hooks(tokens, fwd_hooks=[(name, fn), ...]): runs the model while calling
+        each fn on the named activation, letting fn EDIT it (we set entries to 0 to ablate).
+
+    Because the cache holds all positions from a single pass over the full output sequence, we can
+    read the answer token's activations directly -- there is no "last token has no forward pass"
+    edge case to work around.
 """
 
 import re
 from typing import Any
 
 import torch
-import torch.nn as nn
 from tqdm.auto import tqdm
-from transformers import PreTrainedTokenizerFast
+from transformer_lens.hook_points import HookPoint
+from transformer_lens.model_bridge import TransformerBridge
 
-from model import LargeLanguageModel
-from model.hooks import (
-    AttentionHeadAblationHook,
-    AttentionHeadExtractionStore,
-    MlpNeuronAblationHook,
-    MlpNeuronExtractionStore,
-    MultiLayerActivationStore,
-)
 from utils.dataset import PromptDataset
 
 
@@ -57,7 +66,7 @@ def find_answer_span(generated_text: str) -> tuple[str, int, int] | None:
     return match.group(1), match.start(1), match.end(1)
 
 
-def find_positions_of_interest(tokenizer: PreTrainedTokenizerFast, prompt: str) -> dict[str, int | None]:
+def find_positions_of_interest(model: TransformerBridge, prompt: str) -> dict[str, int | None]:
     """Return extra PROMPT token positions to capture activations at (for --capture-geometry).
 
     WHY this exists: by default we capture activations only at the answer token. But often you
@@ -68,64 +77,60 @@ def find_positions_of_interest(tokenizer: PreTrainedTokenizerFast, prompt: str) 
     the answer.
 
     Args:
-        tokenizer: The model's tokenizer. `tokenizer(prompt, return_offsets_mapping=True)` gives
-            you, for each token, the (start_char, end_char) it covers -- handy for finding the
-            token index of a particular character in the prompt.
+        model: The TransformerLens bridge. Useful helpers: `model.to_str_tokens(prompt,
+            prepend_bos=False)` returns the prompt split into per-token strings (so the i-th
+            entry is the string of token i), which makes it easy to find a token's index.
         prompt: The full prompt string.
 
     Returns:
         dict mapping a name you choose to a token index within the prompt (or None to skip it).
+        IMPORTANT: index tokens WITHOUT a BOS prefix, to match how inference.py tokenizes prompts
+        (prepend_bos=False), so the indices line up with the captured activations.
     """
     # ----------------------------------------------------------------------------------- #
     # TODO (optional): return the prompt token positions you want to study, e.g.
     #     {"operator": 5, "first_operand": 3}. Leave it returning {} to capture only the answer.
     # ----------------------------------------------------------------------------------- #
     #
-    # Example (operator-overloading arithmetic study), capturing the two operands, the operator,
-    # and the '=' of the final 'a<op>b=' question by mapping their character positions to tokens:
+    # Example (operator-overloading arithmetic study), capturing the operator and the '=' of the
+    # final 'a<op>b=' question by scanning the per-token strings of the prompt:
     #
-    #     enc = tokenizer(prompt, return_offsets_mapping=True, return_tensors="pt")
-    #     offsets = enc["offset_mapping"][0].tolist()   # [(start_char, end_char), ...] per token
-    #
-    #     def char_to_token(char_pos: int) -> int | None:
-    #         for tok_idx, (start, end) in enumerate(offsets):
-    #             if start <= char_pos < end:
-    #                 return tok_idx
-    #         return None
-    #
-    #     # find the char positions of the operands / operator / '=' in `prompt`,
-    #     # map each via char_to_token(...), and return them under names you choose:
-    #     return {"operand_a": ia, "operand_b": ib, "operator": iop, "eq_sign": ieq}
+    #     str_tokens = model.to_str_tokens(prompt, prepend_bos=False)  # ["7", "+", "5", "=", ...]
+    #     positions: dict[str, int | None] = {}
+    #     for idx, tok in enumerate(str_tokens):
+    #         if tok.strip() == "+":
+    #             positions["operator"] = idx
+    #         elif tok.strip() == "=":
+    #             positions["eq_sign"] = idx
+    #     return positions
     #
     # ----------------------------------------------------------------------------------- #
     return {}
 
 
-def _map_char_to_token_position(
-    tokenizer: PreTrainedTokenizerFast, token_ids: torch.Tensor, target_char_position: int
-) -> int | None:
-    """Map a character position to token position using incremental decoding.
+def _map_char_to_token(model: TransformerBridge, token_ids: torch.Tensor, target_char_position: int) -> int | None:
+    """Map a character position (in the decoded text) to the token index that covers it.
 
-    Fallback method when offset_mapping is not available.
+    We decode the tokens one more at a time; the first prefix whose decoded text is long enough to
+    reach `target_char_position` is the token that contains that character.
 
     Args:
-        tokenizer: The tokenizer used to decode tokens.
-        token_ids: The token IDs that were decoded.
-        target_char_position: The character position in the decoded text.
+        model: The TransformerLens bridge (for decoding via model.to_string).
+        token_ids: 1-D tensor of token ids that were decoded.
+        target_char_position: A character index into the decoded text.
 
     Returns:
-        The token index that contains or starts at the target character position,
-        or None if mapping fails.
+        The token index containing that character, or None if it can't be mapped.
     """
     for token_idx in range(len(token_ids)):
-        text_so_far = tokenizer.decode(token_ids[: token_idx + 1], skip_special_tokens=True)
+        text_so_far = model.to_string(token_ids[: token_idx + 1])
         if len(text_so_far) > target_char_position:
             return token_idx
     return None
 
 
 def _locate_answer(
-    llm: LargeLanguageModel,
+    model: TransformerBridge,
     prompt_length: int,
     output_ids: torch.Tensor,
     logits: torch.Tensor,
@@ -138,82 +143,115 @@ def _locate_answer(
       3. Map that substring's first and last characters back to token indices.
 
     CONVENTION: we key everything off the answer span's LAST token (e.g. the '2' of "42", the
-    '3' of "-63"). The caller then reads all activations at that one token, so every captured
-    tensor describes the same position. We also return the full span's token ids / string so you
-    still know the whole answer, and the logits the last answer token was sampled from.
+    '3' of "-63"). The caller then reads all activations at that one ABSOLUTE position, so every
+    captured tensor describes the same token. We also return the full span's token ids / string so
+    you still know the whole answer, and the logits the last answer token was predicted from.
 
     Args:
-        llm: The model wrapper (used for its tokenizer).
-        prompt_length: Number of prompt tokens (generation starts right after this).
-        output_ids: Full token sequence [prompt tokens + generated tokens].
-        logits: Per-generated-token logits, shape [n_generated, vocab_size].
+        model: The TransformerLens bridge (used for decoding).
+        prompt_length: Number of prompt tokens (generation starts right after this index).
+        output_ids: Full token sequence [prompt tokens + generated tokens], shape [seq_len].
+        logits: Logits over the full output sequence, shape [1, seq_len, vocab_size].
 
     Returns:
-        (answer_position_in_output, answer_token_ids, answer_token, answer_logits), or all None
-        if no answer span could be located. answer_position_in_output is the ABSOLUTE index (into
-        output_ids) of the answer span's last token.
+        (answer_position, answer_token_ids, answer_token, answer_logits), or all None if no answer
+        span could be located. answer_position is the ABSOLUTE index (into output_ids) of the
+        answer span's last token.
     """
     generated_ids = output_ids[prompt_length:]
     if len(generated_ids) == 0:
         return None, None, None, None
-    generated_text = llm.tokenizer.decode(generated_ids, skip_special_tokens=True)
+    generated_text = model.to_string(generated_ids)
 
     span = find_answer_span(generated_text)
     if span is None:
         return None, None, None, None
     answer_text, answer_start_char, answer_end_char = span
 
-    # Translate character positions in the generated text into token indices.
-    answer_start_token = _map_char_to_token_position(llm.tokenizer, generated_ids, answer_start_char)
-    answer_end_token = _map_char_to_token_position(llm.tokenizer, generated_ids, answer_end_char - 1)
+    # Translate character positions in the generated text into token indices (relative to the
+    # generated chunk).
+    answer_start_token = _map_char_to_token(model, generated_ids, answer_start_char)
+    answer_end_token = _map_char_to_token(model, generated_ids, answer_end_char - 1)
     if answer_start_token is None or answer_end_token is None:
-        return None, None, None, None
-    if not (0 <= answer_start_token < logits.shape[0] and 0 <= answer_end_token < logits.shape[0]):
         return None, None, None, None
 
     # The answer span may be several tokens (e.g. "42" -> ['4', '2']); keep the whole span for
     # reference but key the position off its LAST token (answer_end_token).
     answer_token_ids = generated_ids[answer_start_token : answer_end_token + 1]
-    answer_token = llm.tokenizer.decode(answer_token_ids, skip_special_tokens=True)
+    answer_token = model.to_string(answer_token_ids)
     if answer_token.strip() != answer_text:
         return None, None, None, None
 
-    # Logits the last answer token was sampled from (in an autoregressive model these are computed
-    # one step earlier, at the position just before the token).
-    answer_logits = logits[answer_end_token].detach().clone().cpu()
-    answer_position_in_output = prompt_length + answer_end_token
-    return answer_position_in_output, answer_token_ids, answer_token, answer_logits
+    # Absolute position of the answer span's last token within the full output sequence.
+    answer_position = prompt_length + answer_end_token
+
+    # Logits the last answer token was predicted from: in an autoregressive model the prediction
+    # for position p is computed at position p-1, so we read logits one step earlier.
+    pred_position = answer_position - 1
+    if 0 <= pred_position < logits.shape[1]:
+        answer_logits = logits[0, pred_position].detach().cpu()
+    else:
+        answer_logits = None
+
+    return answer_position, answer_token_ids, answer_token, answer_logits
 
 
-def _extract_all_activations(  # noqa: C901
-    activations: dict[int, list[torch.Tensor]],
-    mlp_store: MlpNeuronExtractionStore,
-    head_store: AttentionHeadExtractionStore,
-    layer_indices: list[int],
-    positions: dict[str, int | None],
-    embedding_tensor: torch.Tensor | None = None,
-) -> dict[str, dict[int, dict[str, torch.Tensor | None]]]:
-    """Extract residual stream, MLP neuron, and attention head activations at prompt token positions.
+def build_ablation_hooks(
+    mlp_ablation: dict[int, list[int]] | None,
+    head_ablation: dict[int, list[int]] | None,
+) -> list[tuple[str, Any]]:
+    """Build the TransformerLens forward-hook list that zeroes out the requested neurons/heads.
 
-    Uses the step-0 full-prompt pass for all three activation types:
-      - Residual stream: activations[layer][0], shape [1, prompt_len, hidden_size]
-      - MLP neurons: mlp_store.activations[layer][0], shape [1, prompt_len, intermediate_size]
-      - Attention heads: head_store.activations[layer][0], shape [1, prompt_len, num_heads, head_dim]
-
-    If embedding_tensor is provided, also populates layer_idx=-1 with the token embedding
-    representation (before any transformer block), with mlp=None and heads=None.
-
-    All sliced at the specified token positions to produce per-position, per-layer dicts.
+    Each entry is a (hook_name, fn) pair. TransformerLens calls fn(activation, hook) during the
+    forward pass and uses fn's return value in place of the original activation, so setting some
+    entries to 0 ABLATES (knocks out) those components -- the core causal test of mechinterp.
 
     Args:
-        activations: Residual stream activations from llm.extract_activations().
-        mlp_store: MLP intermediate activation store (hooked for the forward pass).
-        head_store: Attention head activation store (hooked for the forward pass).
+        mlp_ablation: Optional dict {layer_idx: [neuron indices]} of MLP neurons to zero, applied
+            to blocks.{layer}.mlp.hook_post (shape [batch, pos, d_mlp]).
+        head_ablation: Optional dict {layer_idx: [head indices]} of attention heads to zero,
+            applied to blocks.{layer}.attn.hook_z (shape [batch, pos, n_heads, d_head]).
+
+    Returns:
+        A list of (hook_name, hook_fn) pairs suitable for model.run_with_hooks / model.hooks.
+        Empty if no ablation was requested.
+    """
+    hooks: list[tuple[str, Any]] = []
+
+    if mlp_ablation:
+        for layer_idx, neuron_indices in mlp_ablation.items():
+            # idxs bound as a default arg so each layer's closure keeps its own indices
+            # (the classic Python late-binding gotcha).
+            def mlp_hook(act: torch.Tensor, hook: HookPoint, idxs: list[int] = list(neuron_indices)) -> torch.Tensor:
+                act[..., idxs] = 0.0  # zero these neurons at every position
+                return act
+
+            hooks.append((f"blocks.{layer_idx}.mlp.hook_post", mlp_hook))
+
+    if head_ablation:
+        for layer_idx, head_indices in head_ablation.items():
+
+            def head_hook(act: torch.Tensor, hook: HookPoint, idxs: list[int] = list(head_indices)) -> torch.Tensor:
+                act[:, :, idxs, :] = 0.0  # zero these heads' outputs at every position
+                return act
+
+            hooks.append((f"blocks.{layer_idx}.attn.hook_z", head_hook))
+
+    return hooks
+
+
+def _capture_geometry(
+    cache: dict[str, torch.Tensor],
+    layer_indices: list[int],
+    positions: dict[str, int | None],
+) -> dict[str, dict[int, dict[str, torch.Tensor | None]]]:
+    """Slice residual / MLP / head / embedding activations at named prompt positions out of the cache.
+
+    Args:
+        cache: The activation cache from model.run_with_cache over the full output sequence.
         layer_indices: Layer indices to extract from.
-        positions: Mapping {name: token_index} of prompt positions to capture (from
-            find_positions_of_interest); any index may be None.
-        embedding_tensor: Optional [prompt_len, hidden_size] tensor from the token embedding
-            layer (embed_tokens output at step 0). If provided, stored at layer_idx=-1.
+        positions: Mapping {name: token_index} of prompt positions (from find_positions_of_interest);
+            any index may be None.
 
     Returns:
         dict mapping each position name to layer_idx ->
@@ -221,290 +259,110 @@ def _extract_all_activations(  # noqa: C901
         layer_idx=-1 holds the pre-transformer token embedding (residual only, mlp/heads=None).
     """
     geometry: dict[str, dict] = {name: {} for name in positions}
+    embed = cache["hook_embed"][0]  # [seq_len, d_model]
 
-    # Populate layer_idx=-1 with the token embedding (pre-transformer representation).
-    if embedding_tensor is not None:
-        for name, pos in positions.items():
-            if pos is None or pos < 0 or pos >= embedding_tensor.shape[0]:
-                geometry[name][-1] = {"residual": None, "mlp": None, "heads": None}
-            else:
-                geometry[name][-1] = {
-                    "residual": embedding_tensor[pos].detach().clone().cpu(),
-                    "mlp": None,
-                    "heads": None,
-                }
-
-    for layer_idx in layer_indices:
-        # Step-0 residual stream tensor: [1, prompt_len, hidden_size] → [prompt_len, hidden_size]
-        resid_steps = activations.get(layer_idx, [])
-        step0_resid = None
-        if resid_steps:
-            t = resid_steps[0]
-            step0_resid = t[0] if t.dim() == 3 else (t.unsqueeze(0) if t.dim() == 1 else t)
-
-        # Step-0 MLP neuron tensor: [1, prompt_len, intermediate_size] → [prompt_len, intermediate_size]
-        mlp_steps = mlp_store.activations.get(layer_idx, [])
-        step0_mlp = None
-        if mlp_steps:
-            t = mlp_steps[0]
-            step0_mlp = t[0] if t.dim() == 3 else t
-
-        # Step-0 attention head tensor: [1, prompt_len, num_heads, head_dim] → [prompt_len, num_heads, head_dim]
-        head_steps = head_store.activations.get(layer_idx, [])
-        step0_heads = None
-        if head_steps:
-            t = head_steps[0]
-            step0_heads = t[0] if t.dim() == 4 else t
-
-        for name, pos in positions.items():
-            if pos is None:
-                geometry[name][layer_idx] = {"residual": None, "mlp": None, "heads": None}
-                continue
-
-            def _slice(tensor: torch.Tensor | None, pos: int = pos) -> torch.Tensor | None:
-                if tensor is None or pos < 0 or pos >= tensor.shape[0]:
-                    return None
-                return tensor[pos].detach().clone().cpu()
-
+    for name, pos in positions.items():
+        # layer_idx = -1 holds the token embedding (the pre-block representation).
+        in_embed = pos is not None and 0 <= pos < embed.shape[0]
+        geometry[name][-1] = {
+            "residual": embed[pos].detach().cpu() if in_embed else None,
+            "mlp": None,
+            "heads": None,
+        }
+        for layer_idx in layer_indices:
+            resid = cache[f"blocks.{layer_idx}.hook_resid_post"][0]  # [seq_len, d_model]
+            mlp = cache[f"blocks.{layer_idx}.mlp.hook_post"][0]  # [seq_len, d_mlp]
+            heads = cache[f"blocks.{layer_idx}.attn.hook_z"][0]  # [seq_len, n_heads, d_head]
+            in_range = pos is not None and 0 <= pos < resid.shape[0]
             geometry[name][layer_idx] = {
-                "residual": _slice(step0_resid),
-                "mlp": _slice(step0_mlp),
-                "heads": _slice(step0_heads),  # [num_heads, head_dim]
+                "residual": resid[pos].detach().cpu() if in_range else None,
+                "mlp": mlp[pos].detach().cpu() if in_range else None,
+                "heads": heads[pos].detach().cpu() if in_range else None,  # [n_heads, d_head]
             }
 
     return geometry
 
 
-def _extract_neuron_tensors_at_position(
-    mlp_store: MlpNeuronExtractionStore,
-    head_store: AttentionHeadExtractionStore,
-    generation_step: int,
-    layer_indices: list[int],
-) -> tuple[dict[int, torch.Tensor | None], dict[int, torch.Tensor | None]]:
-    """Read each store's tensor at one generation step and slice out its last position.
-
-    The stores hold one tensor per forward pass (index 0 = the prompt pass, indices 1.. = each
-    generated token). We read the tensor at `generation_step` and take its last position, giving
-    the MLP neurons / attention heads at the token fed in on that step.
-
-    Args:
-        mlp_store: Store of MLP intermediate activations per layer per generation step.
-        head_store: Store of per-head attention outputs per layer per generation step.
-        generation_step: Which forward pass to read (see convention in _run_single_prompt).
-        layer_indices: Layer indices to extract from.
-
-    Returns:
-        mlp_neurons: dict mapping layer_idx to Tensor[intermediate_size], or None if unavailable.
-        attn_heads: dict mapping layer_idx to Tensor[num_heads, head_dim], or None if unavailable.
-    """
-    mlp_neurons: dict[int, torch.Tensor | None] = {}
-    attn_heads: dict[int, torch.Tensor | None] = {}
-
-    for layer_idx in layer_indices:
-        # MLP intermediate neurons at this step's last position.
-        mlp_acts = mlp_store.activations.get(layer_idx, [])
-        if generation_step < len(mlp_acts):
-            act = mlp_acts[generation_step]  # [B, seq_len, intermediate_size]
-            if act.dim() == 3:
-                act = act[0, -1, :]  # [intermediate_size]
-            elif act.dim() == 2:
-                act = act[-1, :]
-            mlp_neurons[layer_idx] = act
-        else:
-            mlp_neurons[layer_idx] = None
-
-        # Per-head attention outputs at this step's last position.
-        head_acts = head_store.activations.get(layer_idx, [])
-        if generation_step < len(head_acts):
-            act = head_acts[generation_step]  # [B, seq_len, num_heads, head_dim]
-            if act.dim() == 4:
-                act = act[0, -1, :, :]  # [num_heads, head_dim]
-            elif act.dim() == 3:
-                act = act[-1, :, :]
-            attn_heads[layer_idx] = act
-        else:
-            attn_heads[layer_idx] = None
-
-    return mlp_neurons, attn_heads
-
-
-def _register_ablation_hooks(
-    llm: LargeLanguageModel,
-    neuron_layers: dict[int, nn.Module],
-    attn_layers: dict[int, nn.Module],
-    mlp_ablation: dict[int, list[int]] | None,
-    head_ablation: dict[int, list[int]] | None,
-) -> list:
-    """Register MLP and attention-head ablation hooks and return the hook objects.
-
-    Ablation hooks must be registered before extraction stores so that PyTorch
-    fires them first; the extraction store then captures the already-zeroed
-    activations, which is what actually flowed through the model.
-
-    Args:
-        llm: The large language model (used for num_attention_heads / head_dim).
-        neuron_layers: Dict mapping layer_idx to the MLP neuron-projection modules (GPT-2: mlp.c_proj).
-        attn_layers: Dict mapping layer_idx to the attention output-projection modules (GPT-2: attn.c_proj).
-        mlp_ablation: Optional dict mapping layer_idx to MLP neuron indices to zero.
-        head_ablation: Optional dict mapping layer_idx to attention head indices to zero.
-
-    Returns:
-        List of registered hook objects; call .remove() on each to clean up.
-    """
-    hooks: list = []
-    if mlp_ablation:
-        for layer_idx, neuron_indices in mlp_ablation.items():
-            if layer_idx in neuron_layers:
-                hooks.append(MlpNeuronAblationHook(neuron_layers[layer_idx], neuron_indices))
-    if head_ablation:
-        for layer_idx, head_indices in head_ablation.items():
-            if layer_idx in attn_layers:
-                hooks.append(
-                    AttentionHeadAblationHook(
-                        attn_layers[layer_idx], head_indices, llm.num_attention_heads, llm.head_dim
-                    )
-                )
-    return hooks
-
-
-def _run_single_prompt(  # noqa: C901
-    llm: LargeLanguageModel,
+def _run_single_prompt(
+    model: TransformerBridge,
     prompt: str,
     prompt_length: int,
-    layers: dict[int, nn.Module],
-    neuron_layers: dict[int, nn.Module],
-    attn_layers: dict[int, nn.Module],
+    layer_indices: list[int],
     max_new_tokens: int,
     mlp_ablation: dict[int, list[int]] | None = None,
     head_ablation: dict[int, list[int]] | None = None,
     capture_geometry: bool = True,
 ) -> dict[str, Any]:
-    """Run a single prompt through the model, capturing neuron-level and geometry activations.
+    """Run a single prompt through the model, capturing answer-token and geometry activations.
+
+    Flow:
+      1. Generate a completion (with any ablation hooks active, so the generation reflects the
+         knocked-out components).
+      2. Re-run the FULL output sequence once -- with the same hooks -- to get logits, and (when
+         capturing geometry) a cache of every layer/position activation.
+      3. Locate the answer span's last token and read all activations at that single position.
 
     Args:
-        llm: The large language model.
+        model: The TransformerLens bridge.
         prompt: Full prompt string.
-        prompt_length: Number of tokens in the prompt.
-        layers: Transformer layer modules for residual-stream extraction.
-        neuron_layers: Dict mapping layer_idx to MLP neuron-projection modules.
-        attn_layers: Dict mapping layer_idx to attention output-projection modules.
+        prompt_length: Number of tokens in the prompt (prepend_bos=False).
+        layer_indices: Layer indices to capture from.
         max_new_tokens: Maximum tokens to generate.
-        mlp_ablation: Optional dict mapping layer_idx to MLP neuron indices to zero out.
-        head_ablation: Optional dict mapping layer_idx to attention head indices to zero out.
-        capture_geometry: If True, extract step-0 activations at the positions returned by
-            find_positions_of_interest and store output_ids. Set to False during ablation
-            sweeps to reduce stored data.
+        mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero out.
+        head_ablation: Optional dict {layer_idx: [head indices]} to zero out.
+        capture_geometry: If True, read per-position activations (MLP neurons, heads, residual,
+            embedding) and store output_ids. Set False during ablation sweeps to store less data.
 
     Returns:
-        Dict with keys: text, completion, output_ids (None when capture_geometry=False), and
-        an answer sub-dict (position, token_id, token, mlp_neurons, attn_heads, residual, logits)
-        plus a geometry sub-dict (empty when capture_geometry=False).
+        Dict with keys: text, completion, output_ids (None when capture_geometry=False), and an
+        answer sub-dict (position, token_id, token, mlp_neurons, attn_heads, residual, embedding,
+        logits) plus a geometry sub-dict (empty when capture_geometry=False).
     """
-    layer_indices = list(layers.keys())
+    ablation_hooks = build_ablation_hooks(mlp_ablation, head_ablation)
+    prompt_tokens = model.to_tokens(prompt, prepend_bos=False)  # [1, prompt_length]
 
-    # ORDER MATTERS. Register ablation hooks FIRST, extraction stores SECOND. PyTorch fires
-    # pre-hooks in registration order, so the ablation zeroes the tensor before the store
-    # records it -- meaning the store captures the activations that *actually* flowed through
-    # the model (post-ablation), not the originals.
-    _ablation_hooks = _register_ablation_hooks(llm, neuron_layers, attn_layers, mlp_ablation, head_ablation)
+    # 1. Generate with ablation applied. Greedy decoding (do_sample=False) so runs are
+    #    deterministic. We pass already-tokenized input (built with prepend_bos=False above) so
+    #    token indices stay aligned with prompt_length.
+    with model.hooks(fwd_hooks=ablation_hooks):
+        out_tokens = model.generate(
+            prompt_tokens,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            return_type="tokens",
+            verbose=False,
+        )
+    output_ids = out_tokens[0].detach().cpu()  # [prompt_length + n_generated]
+    generated_text = model.to_string(output_ids)
+    completion = model.to_string(output_ids[prompt_length:]).strip()
 
-    # Attach the capture stores. When capture_geometry is False (e.g. during a big ablation
-    # sweep) we attach empty no-op stores so we only pay for the residual stream + logits and
-    # skip the heavier per-neuron / per-head / embedding capture.
+    # 2. Re-run the whole output sequence once (same ablation) to read logits, plus a full
+    #    activation cache when we need geometry. One pass covers every position, including the
+    #    answer's last token.
     if capture_geometry:
-        mlp_store = MlpNeuronExtractionStore(neuron_layers)
-        head_store = AttentionHeadExtractionStore(attn_layers, llm.num_attention_heads, llm.head_dim)
-        emb_store = MultiLayerActivationStore({-1: llm.get_embedding_layer()})  # key -1 = token embedding
+        with model.hooks(fwd_hooks=ablation_hooks):
+            logits, cache = model.run_with_cache(out_tokens)
     else:
-        mlp_store = MlpNeuronExtractionStore({})
-        head_store = AttentionHeadExtractionStore({}, llm.num_attention_heads, llm.head_dim)
-        emb_store = None
+        with model.hooks(fwd_hooks=ablation_hooks):
+            logits = model.run_with_hooks(out_tokens, return_type="logits")
+        cache = None
 
-    # Generate. This single call runs the whole decoding loop; every hook above fires on each
-    # forward pass and fills its store. `activations` is the residual stream (per layer, per step).
-    result = llm.extract_activations(prompt, layers, max_new_tokens=max_new_tokens)
-    activations = result["activations"]
-    generated_text = result["generated_text"]
-    completion = result["completion"]
-    logits = result["logits"]
-    output_ids = result["output_ids"]
-
-    # Ablation hooks have done their job for this prompt; detach them so they don't fire again.
-    for hook in _ablation_hooks:
-        hook.remove()
-
-    # Find the answer span in the generation and the absolute position of its LAST token.
-    answer_position_in_output, answer_token_ids, answer_token, answer_logits = _locate_answer(
-        llm, prompt_length, output_ids, logits
+    # 3. Locate the answer span's last token and the absolute position to read activations at.
+    answer_position, answer_token_ids, answer_token, answer_logits = _locate_answer(
+        model, prompt_length, output_ids, logits
     )
 
-    if capture_geometry and answer_position_in_output is not None:
-        # ------------------------------------------------------------------------------------- #
-        # WHICH TOKEN DO WE READ, AND FROM WHICH STORED TENSOR?
-        # ------------------------------------------------------------------------------------- #
-        # We read activations at the answer span's LAST token (e.g. '2' of "42", '3' of "-63").
-        # A token's activations are produced on the forward pass where that token is the INPUT.
-        # Generation runs as: step 0 feeds the whole prompt, then steps 1, 2, ... each feed one
-        # newly generated token. So the answer's last token (generated index `answer_pos_in_gen`)
-        # is the input on generation step `answer_pos_in_gen + 1` -- the "+1" skips the step-0
-        # prompt pass. We use this same step index for the residual stream, MLP neurons, attention
-        # heads, and the token embedding, so all four describe exactly the same token.
-        #
-        # Edge case: if the answer's last token is also the very last token generated (nothing
-        # came after it), the model never fed it back in, so there is no such forward pass and
-        # these captures will be None. Allow a couple of extra tokens (--max-new-tokens) to avoid
-        # this. (The logits are unaffected: they are computed one step earlier, before the token.)
-        # ------------------------------------------------------------------------------------- #
-        answer_pos_in_gen = answer_position_in_output - prompt_length
-        answer_token_step = answer_pos_in_gen + 1
+    # 4. Read all activations at the answer token's position (same position across every tensor,
+    #    so they all describe the same token).
+    if capture_geometry and cache is not None and answer_position is not None:
+        pos = answer_position
+        mlp_neurons = {i: cache[f"blocks.{i}.mlp.hook_post"][0, pos].detach().cpu() for i in layer_indices}
+        attn_heads = {i: cache[f"blocks.{i}.attn.hook_z"][0, pos].detach().cpu() for i in layer_indices}
+        answer_residual = {i: cache[f"blocks.{i}.hook_resid_post"][0, pos].detach().cpu() for i in layer_indices}
+        answer_embedding = cache["hook_embed"][0, pos].detach().cpu()
 
-        mlp_neurons, attn_heads = _extract_neuron_tensors_at_position(
-            mlp_store, head_store, answer_token_step, layer_indices
-        )
-
-        answer_residual: dict[int, torch.Tensor | None] = {}
-        for layer_idx in layer_indices:
-            acts = activations.get(layer_idx, [])  # one entry per forward pass
-            if answer_token_step < len(acts):
-                act = acts[answer_token_step]
-                # Single-token pass -> shape [1, 1, hidden]; take the last (only) position.
-                if act.dim() == 3:
-                    act = act[0, -1, :]
-                elif act.dim() == 2:
-                    act = act[-1, :]
-                answer_residual[layer_idx] = act.detach().clone().cpu()
-            else:
-                answer_residual[layer_idx] = None
-
-        # Token embedding (layer_idx = -1) at the SAME step, so it refers to the same token.
-        answer_embedding: torch.Tensor | None = None
-        if emb_store is not None:
-            emb_acts = emb_store.activations.get(-1, [])
-            if answer_token_step < len(emb_acts):
-                t = emb_acts[answer_token_step]
-                if t.dim() == 3:
-                    answer_embedding = t[0, -1, :].detach().clone().cpu()
-                elif t.dim() == 2:
-                    answer_embedding = t[-1, :].detach().clone().cpu()
-
-        positions = find_positions_of_interest(llm.tokenizer, prompt)
-
-        # Extract prompt-phase embedding tensor: step-0 output of embed_tokens [prompt_len, hidden].
-        step0_embedding: torch.Tensor | None = None
-        if emb_store is not None:
-            emb_acts = emb_store.activations.get(-1, [])
-            if emb_acts:
-                t = emb_acts[0]
-                step0_embedding = t[0] if t.dim() == 3 else t  # [prompt_len, hidden]
-
-        geometry = _extract_all_activations(
-            activations,
-            mlp_store,
-            head_store,
-            layer_indices,
-            positions,
-            embedding_tensor=step0_embedding,
-        )
+        positions = find_positions_of_interest(model, prompt)
+        geometry = _capture_geometry(cache, layer_indices, positions)
     else:
         mlp_neurons = {i: None for i in layer_indices}
         attn_heads = {i: None for i in layer_indices}
@@ -512,77 +370,59 @@ def _run_single_prompt(  # noqa: C901
         answer_embedding = None
         geometry = {}
 
-    mlp_store.remove_all_hooks()
-    mlp_store.clear()
-    head_store.remove_all_hooks()
-    head_store.clear()
-    if emb_store is not None:
-        emb_store.remove_all_hooks()
-        emb_store.clear()
-
     return {
         "text": generated_text,
         "completion": completion,
         "output_ids": output_ids if capture_geometry else None,
         "answer": {
-            "position": answer_position_in_output,
+            "position": answer_position,
             "token_id": answer_token_ids,
             "token": answer_token,
             "mlp_neurons": mlp_neurons,
             "attn_heads": attn_heads,
             "residual": answer_residual,
             "embedding": answer_embedding,
-            "logits": answer_logits.cpu() if answer_logits is not None else None,
+            "logits": answer_logits if answer_logits is not None else None,
         },
         "geometry": geometry,
     }
 
 
 def run(
-    llm: LargeLanguageModel,
+    model: TransformerBridge,
     dataset: PromptDataset,
-    layers: dict[int, nn.Module],
+    layers: list[int],
     max_new_tokens: int,
     mlp_ablation: dict[int, list[int]] | None = None,
     head_ablation: dict[int, list[int]] | None = None,
     capture_geometry: bool = True,
 ) -> list[dict[str, Any]]:
-    """Run inference capturing MLP intermediate, per-head, residual, and geometry activations.
+    """Run inference over a dataset, capturing MLP-neuron, per-head, residual, and geometry activations.
 
     Args:
-        llm: The large language model.
+        model: The TransformerLens bridge.
         dataset: Dataset whose `.prompts` is a list of prompt strings to run.
-        layers: Transformer layer modules (used for residual stream extraction via extract_activations).
+        layers: Layer indices to capture from.
         max_new_tokens: Max tokens to generate per prompt.
-        mlp_ablation: Optional dict mapping layer_idx to list of MLP neuron indices to zero out
-            on every prompt.
-        head_ablation: Optional dict mapping layer_idx to list of attention head indices to zero out
-            on every prompt.
-        capture_geometry: If True, capture step-0 activations at the answer token and at the
-            find_positions_of_interest positions. Set to False during ablation sweeps to avoid
+        mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero on every prompt.
+        head_ablation: Optional dict {layer_idx: [head indices]} to zero on every prompt.
+        capture_geometry: If True, capture activations at the answer token and at the
+            find_positions_of_interest positions. Set False during ablation sweeps to avoid
             storing per-feature geometry data.
 
     Returns:
-        List of result dicts, one per prompt, each with mlp_neurons and attn_heads at the
-        answer token plus geometry activations at the positions of interest.
+        List of result dicts, one per prompt (see _run_single_prompt for the per-prompt schema).
     """
-    # Resolve the concrete modules to hook once, up front (same for every prompt).
-    neuron_layers = llm.get_mlp_neuron_layers(list(layers.keys()))
-    attn_layers = llm.get_attn_output_layers(list(layers.keys()))
-
-    # Process prompts one at a time, collecting one result dict per prompt.
     results: list[dict[str, Any]] = []
     for prompt_idx, prompt in enumerate(tqdm(dataset.prompts, desc="Running neuron inference")):
-        # prompt_length (in tokens) marks the boundary between prompt and generated tokens.
-        prompt_length = len(llm.tokenizer(prompt, return_tensors="pt")["input_ids"][0])
+        # prompt_length (in tokens, no BOS) marks the boundary between prompt and generated tokens.
+        prompt_length = model.to_tokens(prompt, prepend_bos=False).shape[1]
 
         run_result = _run_single_prompt(
-            llm,
+            model,
             prompt,
             prompt_length,
             layers,
-            neuron_layers,
-            attn_layers,
             max_new_tokens,
             mlp_ablation=mlp_ablation,
             head_ablation=head_ablation,

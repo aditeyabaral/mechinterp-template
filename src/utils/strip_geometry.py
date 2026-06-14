@@ -1,12 +1,13 @@
 """Strip large tensor fields from saved inference result .pt files to reduce storage size.
 
-After an analysis run you often keep big activation/logit tensors in the saved .pt
-file. This script writes a lightweight copy of each file with those heavy fields
-removed (keeping metadata, answers, and other small fields).
+A capture run saves big activation tensors (residual stream, MLP neurons, attention heads,
+embeddings, logits) in each .pt file. Once you've finished the heavy analysis you often want a
+small copy that keeps only the lightweight bookkeeping (prompts, answers, metadata) -- e.g. to
+share results or skim them. This script writes such a stripped copy of every file in a directory.
 
-Implement `strip_result` for your saved result schema -- it should drop the heavy
-keys your inference writes. The operator-overloading arithmetic study's version is
-kept below as a commented example. The directory-walking `main()` is generic.
+`strip_result` already targets the result schema this template's main.py produces (both normal
+mode and --intervention mode). If you add your own heavy fields to the saved results, add their
+keys to the lists in `_strip_run` below.
 """
 
 import argparse
@@ -15,48 +16,53 @@ from pathlib import Path
 import torch
 from tqdm.auto import tqdm
 
+# The heavy fields to drop. `_RUN_KEYS` are top-level keys of a single per-prompt run dict;
+# `_ANSWER_KEYS` are the big tensors inside that run's "answer" sub-dict.
+_RUN_KEYS = ("output_ids", "geometry")
+_ANSWER_KEYS = ("mlp_neurons", "attn_heads", "residual", "embedding", "logits")
+
+
+def _strip_run(run: dict) -> None:
+    """Drop the heavy tensors from one per-prompt run dict (the inner "result"), in place."""
+    for key in _RUN_KEYS:
+        run.pop(key, None)
+    answer = run.get("answer")
+    if isinstance(answer, dict):
+        for key in _ANSWER_KEYS:
+            answer.pop(key, None)
+
+
+def _strip_rows(rows: list[dict]) -> None:
+    """Strip every row produced by inference.run.
+
+    Each row looks like {"prompt_idx", "prompt", "prompt_length", "result": {<run dict>}}.
+    """
+    for row in rows:
+        run = row.get("result")
+        if isinstance(run, dict):
+            _strip_run(run)
+
 
 def strip_result(data: dict) -> dict:
-    """Remove heavy tensor fields from one loaded result dict (in place) and return it.
+    """Remove the heavy tensor fields from a loaded .pt result file (in place) and return it.
+
+    Handles both layouts main.py saves:
+      - normal mode:        {"result": [rows], "metadata": {...}}
+      - intervention mode:  {"baseline": [rows], "ablations": [{..., "result": [rows]}], "metadata": {...}}
 
     Args:
-        data: A result dict loaded from a saved .pt file.
+        data: The dict loaded from a saved .pt file.
 
     Returns:
         The same dict with large tensor fields removed.
     """
-    # ----------------------------------------------------------------------- #
-    # TODO: drop the heavy keys your inference saves for your result schema.
-    # ----------------------------------------------------------------------- #
-    #
-    # Example (operator-overloading arithmetic study), where each prompt has
-    # "original"/"overloaded" runs carrying activation/geometry tensors:
-    #
-    #     def _strip_run(run: dict) -> None:
-    #         run.pop("output_ids", None)
-    #         run.pop("geometry", None)
-    #         answer = run.get("answer")
-    #         if isinstance(answer, dict):
-    #             for key in ("mlp_neurons", "attn_heads", "residual", "embedding", "logits"):
-    #                 answer.pop(key, None)
-    #
-    #     def _strip_prompt_list(prompt_list: list[dict]) -> None:
-    #         for prompt in prompt_list:
-    #             for run_key in ("original", "overloaded"):
-    #                 run = prompt.get(run_key)
-    #                 if isinstance(run, dict):
-    #                     _strip_run(run)
-    #
-    #     if "baseline" in data:                       # intervention-mode file
-    #         _strip_prompt_list(data["baseline"])
-    #         for abl in data.get("ablations", []):
-    #             _strip_prompt_list(abl["result"])
-    #     elif "result" in data:                       # normal-mode file
-    #         _strip_prompt_list(data["result"])
-    #     return data
-    #
-    # ----------------------------------------------------------------------- #
-    raise NotImplementedError("Implement strip_result() for your task -- see the example in comments.")
+    if "baseline" in data:  # intervention-mode file
+        _strip_rows(data["baseline"])
+        for ablation in data.get("ablations", []):
+            _strip_rows(ablation.get("result", []))
+    elif "result" in data:  # normal-mode file
+        _strip_rows(data["result"])
+    return data
 
 
 def main() -> None:

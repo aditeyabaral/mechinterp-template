@@ -48,10 +48,24 @@ def assign_condition(row: dict[str, Any], metadata: dict[str, Any]) -> str | Non
     Returns:
         A condition name, or None to exclude this row from the analysis.
     """
-    # TODO: split your rows into the conditions you want to compare.
-    # Example: bucket by whether the model answered correctly, or by some attribute of
-    # row["prompt"], e.g.:
-    #     return "correct" if row["result"]["answer"]["token"] == row.get("gold") else "incorrect"
+    # ----------------------------------------------------------------------------------- #
+    # TODO (optional): split your rows into the conditions you want to COMPARE. Return a label
+    # (any string) per row; rows with the same label are analysed together and the Lasso runs once
+    # per label. Return None to drop a row. The default ("all") puts every row in one group, which
+    # is fine if you just want a single set of important features.
+    #
+    # WHY: comparing conditions answers "are DIFFERENT neurons/heads important in situation A vs B?"
+    # -- e.g. prompts the model got right vs wrong, or two kinds of question. You define the split
+    # from whatever each row contains:
+    #     row["prompt"]                    -> the prompt string you ran
+    #     row["result"]["answer"]["token"] -> the answer string the model generated
+    #     row["result"]["completion"]      -> the full generated text
+    # ----------------------------------------------------------------------------------- #
+    #
+    # Example: compare prompts whose generated answer is a single digit vs anything else:
+    #     ans = (row["result"]["answer"]["token"] or "").strip()
+    #     return "single_digit" if ans.isdigit() and len(ans) == 1 else "other"
+    #
     return "all"
 
 
@@ -69,18 +83,31 @@ def build_target(row: dict[str, Any], metadata: dict[str, Any]) -> float | None:
     Returns:
         A float target, or None to exclude this row.
     """
-    # TODO: define the quantity you want to explain for your task.
-    # Example (operator-overloading arithmetic study): regress against the numeric answer value,
-    # parsed from the stored answer string (handling a reversed-digit format if you trained that way):
-    #     s = str(row["answer_original"]).strip()
-    #     return float(s[::-1]) if reverse else float(s)
+    # ----------------------------------------------------------------------------------- #
+    # TODO (optional): return the scalar the Lasso should try to predict from the activations.
+    # The Lasso then keeps only the few neurons/heads whose activations linearly predict it -- those
+    # are the "important" ones for that quantity. So pick a target that captures the behaviour you
+    # care about. Return None to drop a row.
+    #
+    # The default below uses the id of the answer's last token (a generic "which neurons carry the
+    # output token" probe). Override it with something meaningful -- often a number you can compute
+    # from the prompt or the answer. Available fields: row["prompt"],
+    # row["result"]["answer"]["token"], row["result"]["answer"]["token_id"].
+    # ----------------------------------------------------------------------------------- #
+    #
+    # Example (arithmetic): regress against the TRUE numeric answer, computed from the prompt's last
+    # line "...\n7+5=" (this works even when the model is wrong, since it doesn't use the output):
+    #     question = row["prompt"].rsplit("\n", 1)[-1].rstrip("=")   # "7+5"
+    #     a, b = question.split("+")
+    #     return float(int(a) + int(b))
+    #
     answer = row["result"]["answer"]
     token_id = answer.get("token_id")
     if token_id is None:
         return None
     # token_id may be a tensor of several ids (if the answer span is >1 token, e.g. "42" -> ['4','2']).
-    # We use the LAST one, because inference.py captures activations at the answer span's last token
-    # (see answer_position_in_generated). Target and capture position should refer to the same token.
+    # We use the LAST one, because inference.py captures activations at the answer span's LAST token,
+    # so the target and the captured activations describe the same token.
     ids = torch.as_tensor(token_id).flatten()
     if ids.numel() == 0:
         return None

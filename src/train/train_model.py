@@ -170,7 +170,14 @@ if __name__ == "__main__":
     parser.add_argument("--eval-max-new-tokens", type=int, default=16, help="Max tokens to generate per eval prompt")
     parser.add_argument("--learning-rate", type=float, default=1e-3, help="Peak learning rate")
     parser.add_argument("--warmup-ratio", type=float, default=0.05, help="Fraction of steps used for LR warmup")
-    parser.add_argument("--weight-decay", type=float, default=0.01, help="AdamW weight decay")
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=1.0,
+        help="AdamW weight decay. Defaults to a strong 1.0: heavy weight decay is a well-known "
+        "trigger for 'grokking' (the model first memorises the training data, then later "
+        "suddenly generalises), which is a phenomenon worth being able to study in small models.",
+    )
     parser.add_argument("--max-grad-norm", type=float, default=1.0, help="Gradient clipping max norm")
     parser.add_argument("--logging-steps", type=int, default=100, help="Log every N steps")
     parser.add_argument("--eval-steps", type=int, default=500, help="Evaluate every N steps")

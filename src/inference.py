@@ -12,7 +12,6 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # noqa: N812
 from tqdm.auto import tqdm
 from transformers import PreTrainedTokenizerFast
 
@@ -28,20 +27,29 @@ from utils.dataset import PromptDataset
 
 
 def find_answer_span(generated_text: str) -> tuple[str, int, int] | None:
-    """Locate the model's answer within the generated text.
+    """Locate the model's answer inside the text it generated.
 
-    The default takes the first whitespace-delimited token of the generation, which
-    is a reasonable target for single-token answers. Override for your task.
+    WHY this exists: the model just produces a stream of tokens; we need to know which part of
+    that stream is "the answer" so we can read activations at the right place. This function
+    returns the character span of the answer; inference.py then maps it to tokens and captures
+    activations at the answer's LAST token.
+
+    The default grabs the first whitespace-delimited chunk of the generation (a good target for
+    short, single-"word" answers like a number). Override it if your answers look different.
 
     Args:
-        generated_text: The decoded text generated after the prompt.
+        generated_text: The decoded text the model generated after the prompt.
 
     Returns:
-        (answer_text, start_char, end_char) within generated_text, or None if not found.
+        (answer_text, start_char, end_char): the answer substring and its character offsets
+        within generated_text, or None if no answer could be found (that prompt is then skipped).
     """
-    # TODO: customise how the answer is located in the generation for your task.
-    # Example (operator-overloading arithmetic study): match a signed integer, handling
-    # both normal format (e.g. "-46") and reverse-trained format (e.g. "64-"):
+    # TODO (optional): change how the answer is located for your task. Return the (text, start,
+    # end) of the answer substring, or None to skip the prompt. The default below works for many
+    # short answers; only change it if your answer format needs something more specific.
+    #
+    # Example (operator-overloading arithmetic study): match a signed integer, handling both the
+    # normal format (e.g. "-46") and the reverse-digit training format (e.g. "64-"):
     #     match = re.search(r"^\s*([+-]?\d+[+-]?)", generated_text)
     match = re.search(r"^\s*(\S+)", generated_text)
     if not match:
@@ -50,27 +58,34 @@ def find_answer_span(generated_text: str) -> tuple[str, int, int] | None:
 
 
 def find_positions_of_interest(tokenizer: PreTrainedTokenizerFast, prompt: str) -> dict[str, int | None]:
-    """Return a mapping {name: prompt_token_index} of positions to capture for --capture-geometry.
+    """Return extra PROMPT token positions to capture activations at (for --capture-geometry).
 
-    These prompt token positions are captured (residual / MLP / heads / embedding) in
-    addition to the answer token. The default is no extra positions; override for your task.
+    WHY this exists: by default we capture activations only at the answer token. But often you
+    also want activations at specific INPUT positions -- e.g. for "7+5=" you might study the
+    representations sitting on the "7", the "5", and the "+". This function names those positions
+    so inference.py records residual/MLP/head/embedding activations there too, stored under
+    result["geometry"][name]. The default returns nothing, which is fine if you only care about
+    the answer.
 
     Args:
-        tokenizer: The model's tokenizer (use return_offsets_mapping to locate tokens).
+        tokenizer: The model's tokenizer. `tokenizer(prompt, return_offsets_mapping=True)` gives
+            you, for each token, the (start_char, end_char) it covers -- handy for finding the
+            token index of a particular character in the prompt.
         prompt: The full prompt string.
 
     Returns:
-        dict mapping a position name to a token index within the prompt (or None).
+        dict mapping a name you choose to a token index within the prompt (or None to skip it).
     """
-    # ----------------------------------------------------------------------- #
-    # TODO: return the prompt token positions of interest for your task.
-    # ----------------------------------------------------------------------- #
+    # ----------------------------------------------------------------------------------- #
+    # TODO (optional): return the prompt token positions you want to study, e.g.
+    #     {"operator": 5, "first_operand": 3}. Leave it returning {} to capture only the answer.
+    # ----------------------------------------------------------------------------------- #
     #
-    # Example (operator-overloading arithmetic study), capturing the two operands,
-    # the operator, and the '=' of the final 'a<op>b=' question:
+    # Example (operator-overloading arithmetic study), capturing the two operands, the operator,
+    # and the '=' of the final 'a<op>b=' question by mapping their character positions to tokens:
     #
     #     enc = tokenizer(prompt, return_offsets_mapping=True, return_tensors="pt")
-    #     offsets = enc["offset_mapping"][0].tolist()
+    #     offsets = enc["offset_mapping"][0].tolist()   # [(start_char, end_char), ...] per token
     #
     #     def char_to_token(char_pos: int) -> int | None:
     #         for tok_idx, (start, end) in enumerate(offsets):
@@ -78,11 +93,11 @@ def find_positions_of_interest(tokenizer: PreTrainedTokenizerFast, prompt: str) 
     #                 return tok_idx
     #         return None
     #
-    #     # locate the char positions of the operands / operator / '=' in `prompt`,
-    #     # map each via char_to_token(...), and return them by name:
+    #     # find the char positions of the operands / operator / '=' in `prompt`,
+    #     # map each via char_to_token(...), and return them under names you choose:
     #     return {"operand_a": ia, "operand_b": ib, "operator": iop, "eq_sign": ieq}
     #
-    # ----------------------------------------------------------------------- #
+    # ----------------------------------------------------------------------------------- #
     return {}
 
 
@@ -109,115 +124,65 @@ def _map_char_to_token_position(
     return None
 
 
-def _extract_answer_token_tensors(  # noqa: C901
+def _locate_answer(
     llm: LargeLanguageModel,
     prompt_length: int,
     output_ids: torch.Tensor,
-    activations: dict[int, list[torch.Tensor]],
     logits: torch.Tensor,
-    attentions: dict[int, list[torch.Tensor]],
-) -> (
-    tuple[dict[int, None], None, None, dict[int, None], None, None, None]
-    | tuple[dict[Any, Any], torch.Tensor, torch.Tensor, dict[Any, Any], int, torch.Tensor, Any]
-):
-    """Extract token probabilities, activations, and attention for the answer token.
+) -> tuple[int | None, torch.Tensor | None, str | None, torch.Tensor | None]:
+    """Find the answer span in the generated text and report which token to read activations from.
 
-    The answer span within the generated text is located by `find_answer_span`
-    (override that for your task), then mapped back to token positions.
+    Steps:
+      1. Decode the generated tokens (everything after the prompt) to text.
+      2. Ask `find_answer_span` which substring is "the answer" (you override that per task).
+      3. Map that substring's first and last characters back to token indices.
 
-    Passing empty dicts ({}) for activations and attentions is valid: the function
-    will return empty dicts for answer_activations and answer_attention, while still
-    correctly extracting the answer token string from output_ids and logits.
+    CONVENTION: we key everything off the answer span's LAST token (e.g. the '2' of "42", the
+    '3' of "-63"). The caller then reads all activations at that one token, so every captured
+    tensor describes the same position. We also return the full span's token ids / string so you
+    still know the whole answer, and the logits the last answer token was sampled from.
 
     Args:
-        llm: The large language model.
-        prompt_length: The length of the prompt in tokens.
-        output_ids: The output token IDs generated by the model.
-        activations: Layer activations dict (may be empty).
-        logits: The logits of the generated tokens, shape [seq_len_generated, vocab_size].
-        attentions: Attention weights dict (may be empty).
+        llm: The model wrapper (used for its tokenizer).
+        prompt_length: Number of prompt tokens (generation starts right after this).
+        output_ids: Full token sequence [prompt tokens + generated tokens].
+        logits: Per-generated-token logits, shape [n_generated, vocab_size].
 
     Returns:
-        answer_activations: Activations at answer token per layer (empty if activations={}).
-        answer_probs: Softmax probabilities for answer tokens.
-        answer_logits: Logits for answer tokens.
-        answer_attention: Attention weights at answer token per layer (empty if attentions={}).
-        answer_position_in_output: Absolute position of the answer token in full output.
-        answer_token_ids: Token IDs of the answer.
-        answer_token: Decoded string of the answer.
+        (answer_position_in_output, answer_token_ids, answer_token, answer_logits), or all None
+        if no answer span could be located. answer_position_in_output is the ABSOLUTE index (into
+        output_ids) of the answer span's last token.
     """
-
-    def _none_tuple(activations: dict, attentions: dict) -> tuple:
-        return (
-            {layer_idx: None for layer_idx in activations.keys()},
-            None,
-            None,
-            {layer_idx: None for layer_idx in attentions.keys()},
-            None,
-            None,
-            None,
-        )
-
     generated_ids = output_ids[prompt_length:]
     if len(generated_ids) == 0:
-        return _none_tuple(activations, attentions)
+        return None, None, None, None
     generated_text = llm.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
     span = find_answer_span(generated_text)
     if span is None:
-        return _none_tuple(activations, attentions)
+        return None, None, None, None
     answer_text, answer_start_char, answer_end_char = span
 
+    # Translate character positions in the generated text into token indices.
     answer_start_token = _map_char_to_token_position(llm.tokenizer, generated_ids, answer_start_char)
     answer_end_token = _map_char_to_token_position(llm.tokenizer, generated_ids, answer_end_char - 1)
-
     if answer_start_token is None or answer_end_token is None:
-        return _none_tuple(activations, attentions)
-
-    answer_position_in_generated = answer_end_token
-
+        return None, None, None, None
     if not (0 <= answer_start_token < logits.shape[0] and 0 <= answer_end_token < logits.shape[0]):
-        return _none_tuple(activations, attentions)
+        return None, None, None, None
 
-    answer_logits = logits[answer_start_token : answer_end_token + 1]
-    answer_probs = F.softmax(answer_logits, dim=-1)
+    # The answer span may be several tokens (e.g. "42" -> ['4', '2']); keep the whole span for
+    # reference but key the position off its LAST token (answer_end_token).
     answer_token_ids = generated_ids[answer_start_token : answer_end_token + 1]
     answer_token = llm.tokenizer.decode(answer_token_ids, skip_special_tokens=True)
-
     if answer_token.strip() != answer_text:
-        return _none_tuple(activations, attentions)
+        return None, None, None, None
 
-    answer_activations = {}
-    for layer_idx in activations.keys():
-        if answer_position_in_generated < len(activations[layer_idx]):
-            act = activations[layer_idx][answer_position_in_generated]
-            if act.dim() == 3:
-                act = act[0, -1, :]
-            elif act.dim() == 2:
-                act = act[-1, :]
-            answer_activations[layer_idx] = act
-        else:
-            answer_activations[layer_idx] = None
-
-    answer_attention = {}
-    for layer_idx in attentions.keys():
-        if answer_position_in_generated < len(attentions[layer_idx]):
-            full_attention_for_answer_token = attentions[layer_idx][answer_position_in_generated]
-            answer_attention[layer_idx] = full_attention_for_answer_token[:, :prompt_length]
-        else:
-            answer_attention[layer_idx] = None
-
-    answer_position_in_output = prompt_length + answer_position_in_generated
-
-    return (
-        answer_activations,
-        answer_probs,
-        answer_logits,
-        answer_attention,
-        answer_position_in_output,
-        answer_token_ids,
-        answer_token,
-    )
+    # Logits the last answer token was sampled from (in an autoregressive model these are computed
+    # one step earlier, at the position just before the token).
+    answer_logits = logits[answer_end_token].detach().clone().cpu()
+    answer_position_in_output = prompt_length + answer_end_token
+    return answer_position_in_output, answer_token_ids, answer_token, answer_logits
 
 
 def _extract_all_activations(  # noqa: C901
@@ -313,15 +278,19 @@ def _extract_all_activations(  # noqa: C901
 def _extract_neuron_tensors_at_position(
     mlp_store: MlpNeuronExtractionStore,
     head_store: AttentionHeadExtractionStore,
-    answer_position_in_generated: int,
+    generation_step: int,
     layer_indices: list[int],
 ) -> tuple[dict[int, torch.Tensor | None], dict[int, torch.Tensor | None]]:
-    """Extract MLP neuron and attention head activations at the answer token generation step.
+    """Read each store's tensor at one generation step and slice out its last position.
+
+    The stores hold one tensor per forward pass (index 0 = the prompt pass, indices 1.. = each
+    generated token). We read the tensor at `generation_step` and take its last position, giving
+    the MLP neurons / attention heads at the token fed in on that step.
 
     Args:
-        mlp_store: Store containing MLP intermediate activations per layer per generation step.
-        head_store: Store containing per-head attention outputs per layer per generation step.
-        answer_position_in_generated: Index of the answer token in the generated sequence (0-indexed).
+        mlp_store: Store of MLP intermediate activations per layer per generation step.
+        head_store: Store of per-head attention outputs per layer per generation step.
+        generation_step: Which forward pass to read (see convention in _run_single_prompt).
         layer_indices: Layer indices to extract from.
 
     Returns:
@@ -332,10 +301,10 @@ def _extract_neuron_tensors_at_position(
     attn_heads: dict[int, torch.Tensor | None] = {}
 
     for layer_idx in layer_indices:
-        # MLP intermediate neurons
+        # MLP intermediate neurons at this step's last position.
         mlp_acts = mlp_store.activations.get(layer_idx, [])
-        if answer_position_in_generated < len(mlp_acts):
-            act = mlp_acts[answer_position_in_generated]  # [B, seq_len, intermediate_size]
+        if generation_step < len(mlp_acts):
+            act = mlp_acts[generation_step]  # [B, seq_len, intermediate_size]
             if act.dim() == 3:
                 act = act[0, -1, :]  # [intermediate_size]
             elif act.dim() == 2:
@@ -344,10 +313,10 @@ def _extract_neuron_tensors_at_position(
         else:
             mlp_neurons[layer_idx] = None
 
-        # Per-head attention outputs
+        # Per-head attention outputs at this step's last position.
         head_acts = head_store.activations.get(layer_idx, [])
-        if answer_position_in_generated < len(head_acts):
-            act = head_acts[answer_position_in_generated]  # [B, seq_len, num_heads, head_dim]
+        if generation_step < len(head_acts):
+            act = head_acts[generation_step]  # [B, seq_len, num_heads, head_dim]
             if act.dim() == 4:
                 act = act[0, -1, :, :]  # [num_heads, head_dim]
             elif act.dim() == 3:
@@ -361,8 +330,8 @@ def _extract_neuron_tensors_at_position(
 
 def _register_ablation_hooks(
     llm: LargeLanguageModel,
-    down_proj_layers: dict[int, nn.Module],
-    o_proj_layers: dict[int, nn.Module],
+    neuron_layers: dict[int, nn.Module],
+    attn_layers: dict[int, nn.Module],
     mlp_ablation: dict[int, list[int]] | None,
     head_ablation: dict[int, list[int]] | None,
 ) -> list:
@@ -374,8 +343,8 @@ def _register_ablation_hooks(
 
     Args:
         llm: The large language model (used for num_attention_heads / head_dim).
-        down_proj_layers: Dict mapping layer_idx to mlp.down_proj modules.
-        o_proj_layers: Dict mapping layer_idx to self_attn.o_proj modules.
+        neuron_layers: Dict mapping layer_idx to the MLP neuron-projection modules (GPT-2: mlp.c_proj).
+        attn_layers: Dict mapping layer_idx to the attention output-projection modules (GPT-2: attn.c_proj).
         mlp_ablation: Optional dict mapping layer_idx to MLP neuron indices to zero.
         head_ablation: Optional dict mapping layer_idx to attention head indices to zero.
 
@@ -385,14 +354,14 @@ def _register_ablation_hooks(
     hooks: list = []
     if mlp_ablation:
         for layer_idx, neuron_indices in mlp_ablation.items():
-            if layer_idx in down_proj_layers:
-                hooks.append(MlpNeuronAblationHook(down_proj_layers[layer_idx], neuron_indices))
+            if layer_idx in neuron_layers:
+                hooks.append(MlpNeuronAblationHook(neuron_layers[layer_idx], neuron_indices))
     if head_ablation:
         for layer_idx, head_indices in head_ablation.items():
-            if layer_idx in o_proj_layers:
+            if layer_idx in attn_layers:
                 hooks.append(
                     AttentionHeadAblationHook(
-                        o_proj_layers[layer_idx], head_indices, llm.num_attention_heads, llm.head_dim
+                        attn_layers[layer_idx], head_indices, llm.num_attention_heads, llm.head_dim
                     )
                 )
     return hooks
@@ -403,8 +372,8 @@ def _run_single_prompt(  # noqa: C901
     prompt: str,
     prompt_length: int,
     layers: dict[int, nn.Module],
-    down_proj_layers: dict[int, nn.Module],
-    o_proj_layers: dict[int, nn.Module],
+    neuron_layers: dict[int, nn.Module],
+    attn_layers: dict[int, nn.Module],
     max_new_tokens: int,
     mlp_ablation: dict[int, list[int]] | None = None,
     head_ablation: dict[int, list[int]] | None = None,
@@ -417,8 +386,8 @@ def _run_single_prompt(  # noqa: C901
         prompt: Full prompt string.
         prompt_length: Number of tokens in the prompt.
         layers: Transformer layer modules for residual-stream extraction.
-        down_proj_layers: Dict mapping layer_idx to MLP neuron-projection modules.
-        o_proj_layers: Dict mapping layer_idx to attention output-projection modules.
+        neuron_layers: Dict mapping layer_idx to MLP neuron-projection modules.
+        attn_layers: Dict mapping layer_idx to attention output-projection modules.
         max_new_tokens: Maximum tokens to generate.
         mlp_ablation: Optional dict mapping layer_idx to MLP neuron indices to zero out.
         head_ablation: Optional dict mapping layer_idx to attention head indices to zero out.
@@ -437,14 +406,14 @@ def _run_single_prompt(  # noqa: C901
     # pre-hooks in registration order, so the ablation zeroes the tensor before the store
     # records it -- meaning the store captures the activations that *actually* flowed through
     # the model (post-ablation), not the originals.
-    _ablation_hooks = _register_ablation_hooks(llm, down_proj_layers, o_proj_layers, mlp_ablation, head_ablation)
+    _ablation_hooks = _register_ablation_hooks(llm, neuron_layers, attn_layers, mlp_ablation, head_ablation)
 
     # Attach the capture stores. When capture_geometry is False (e.g. during a big ablation
     # sweep) we attach empty no-op stores so we only pay for the residual stream + logits and
     # skip the heavier per-neuron / per-head / embedding capture.
     if capture_geometry:
-        mlp_store = MlpNeuronExtractionStore(down_proj_layers)
-        head_store = AttentionHeadExtractionStore(o_proj_layers, llm.num_attention_heads, llm.head_dim)
+        mlp_store = MlpNeuronExtractionStore(neuron_layers)
+        head_store = AttentionHeadExtractionStore(attn_layers, llm.num_attention_heads, llm.head_dim)
         emb_store = MultiLayerActivationStore({-1: llm.get_embedding_layer()})  # key -1 = token embedding
     else:
         mlp_store = MlpNeuronExtractionStore({})
@@ -458,44 +427,47 @@ def _run_single_prompt(  # noqa: C901
     generated_text = result["generated_text"]
     completion = result["completion"]
     logits = result["logits"]
-    attentions = result["attentions"]
     output_ids = result["output_ids"]
 
     # Ablation hooks have done their job for this prompt; detach them so they don't fire again.
     for hook in _ablation_hooks:
         hook.remove()
 
-    # Locate "the answer" inside the generated text (via find_answer_span) and translate that
-    # into a token position in the full output sequence, so we know WHERE to read activations.
-    (
-        _,
-        _,
-        answer_logits,
-        _,
-        answer_position_in_output,
-        answer_token_ids,
-        answer_token,
-    ) = _extract_answer_token_tensors(
-        llm,
-        prompt_length,
-        output_ids,
-        activations,
-        logits,
-        attentions,
+    # Find the answer span in the generation and the absolute position of its LAST token.
+    answer_position_in_output, answer_token_ids, answer_token, answer_logits = _locate_answer(
+        llm, prompt_length, output_ids, logits
     )
 
     if capture_geometry and answer_position_in_output is not None:
-        # Positions in the stores are indexed by generation step. The answer's absolute
-        # position minus the prompt length gives its index among the generated tokens.
+        # ------------------------------------------------------------------------------------- #
+        # WHICH TOKEN DO WE READ, AND FROM WHICH STORED TENSOR?
+        # ------------------------------------------------------------------------------------- #
+        # We read activations at the answer span's LAST token (e.g. '2' of "42", '3' of "-63").
+        # A token's activations are produced on the forward pass where that token is the INPUT.
+        # Generation runs as: step 0 feeds the whole prompt, then steps 1, 2, ... each feed one
+        # newly generated token. So the answer's last token (generated index `answer_pos_in_gen`)
+        # is the input on generation step `answer_pos_in_gen + 1` -- the "+1" skips the step-0
+        # prompt pass. We use this same step index for the residual stream, MLP neurons, attention
+        # heads, and the token embedding, so all four describe exactly the same token.
+        #
+        # Edge case: if the answer's last token is also the very last token generated (nothing
+        # came after it), the model never fed it back in, so there is no such forward pass and
+        # these captures will be None. Allow a couple of extra tokens (--max-new-tokens) to avoid
+        # this. (The logits are unaffected: they are computed one step earlier, before the token.)
+        # ------------------------------------------------------------------------------------- #
         answer_pos_in_gen = answer_position_in_output - prompt_length
+        answer_token_step = answer_pos_in_gen + 1
+
         mlp_neurons, attn_heads = _extract_neuron_tensors_at_position(
-            mlp_store, head_store, answer_pos_in_gen, layer_indices
+            mlp_store, head_store, answer_token_step, layer_indices
         )
+
         answer_residual: dict[int, torch.Tensor | None] = {}
         for layer_idx in layer_indices:
-            acts = activations.get(layer_idx, [])
-            if answer_pos_in_gen < len(acts):
-                act = acts[answer_pos_in_gen]
+            acts = activations.get(layer_idx, [])  # one entry per forward pass
+            if answer_token_step < len(acts):
+                act = acts[answer_token_step]
+                # Single-token pass -> shape [1, 1, hidden]; take the last (only) position.
                 if act.dim() == 3:
                     act = act[0, -1, :]
                 elif act.dim() == 2:
@@ -504,16 +476,12 @@ def _run_single_prompt(  # noqa: C901
             else:
                 answer_residual[layer_idx] = None
 
-        # Extract token embedding at the answer generation step (layer_idx=-1).
-        # emb_store captures every forward call to embed_tokens; answer_pos_in_gen+1
-        # because step 0 is the full prompt pass and steps 1..N are single-token passes.
+        # Token embedding (layer_idx = -1) at the SAME step, so it refers to the same token.
         answer_embedding: torch.Tensor | None = None
         if emb_store is not None:
             emb_acts = emb_store.activations.get(-1, [])
-            answer_emb_step = answer_pos_in_gen + 1  # step 0 = prompt, steps 1..N = generated tokens
-            if answer_emb_step < len(emb_acts):
-                t = emb_acts[answer_emb_step]
-                # Single-token call: shape [1, 1, hidden] → [hidden]
+            if answer_token_step < len(emb_acts):
+                t = emb_acts[answer_token_step]
                 if t.dim() == 3:
                     answer_embedding = t[0, -1, :].detach().clone().cpu()
                 elif t.dim() == 2:
@@ -599,8 +567,8 @@ def run(
         answer token plus geometry activations at the positions of interest.
     """
     # Resolve the concrete modules to hook once, up front (same for every prompt).
-    down_proj_layers = llm.get_mlp_neuron_layers(list(layers.keys()))
-    o_proj_layers = llm.get_attn_output_layers(list(layers.keys()))
+    neuron_layers = llm.get_mlp_neuron_layers(list(layers.keys()))
+    attn_layers = llm.get_attn_output_layers(list(layers.keys()))
 
     # Process prompts one at a time, collecting one result dict per prompt.
     results: list[dict[str, Any]] = []
@@ -613,8 +581,8 @@ def run(
             prompt,
             prompt_length,
             layers,
-            down_proj_layers,
-            o_proj_layers,
+            neuron_layers,
+            attn_layers,
             max_new_tokens,
             mlp_ablation=mlp_ablation,
             head_ablation=head_ablation,

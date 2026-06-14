@@ -24,9 +24,19 @@ from tokenizers.pre_tokenizers import Split
 from transformers import PreTrainedTokenizerFast
 
 # --------------------------------------------------------------------------- #
-# TODO: fill these in for your task.
+# TODO: fill these two lists in for your task.
+#
+#   VOCAB_CHARS:  EVERY character that can appear in any prompt or answer your model
+#                 will ever see -- digits, operators, letters, spaces, newline, etc.
+#                 The tokenizer gives each one its own token id. Anything you forget to
+#                 list becomes the <unk> token, so be exhaustive. Use sorted(...) so the
+#                 vocabulary order is deterministic across machines.
+#
+#   SAMPLE_TEXTS: a handful of representative strings (using only VOCAB_CHARS). The block
+#                 at the bottom of this file encodes then decodes each one and checks it
+#                 round-trips exactly -- a quick sanity check that your vocab is complete.
 # --------------------------------------------------------------------------- #
-
+#
 # Example (arithmetic study):
 # VOCAB_CHARS = sorted("0123456789$+-*/%=\n")
 # SAMPLE_TEXTS = [

@@ -4,6 +4,22 @@ Normal mode:   run N prompts, save activations.
 Intervention mode (--intervention <analysis.json>):
     Run the same N prompts without hooks (baseline), then for each important
     neuron/head in the JSON run the same N prompts with that feature zeroed.
+
+================================ ADAPTING THIS TEMPLATE ================================
+This file runs out of the box once you implement your task's prompts. Every place you
+need to edit is marked with a `TODO` comment -- run `grep -rn TODO src/` to list them.
+The extension points, in the order you'll likely touch them:
+
+  1. src/utils/dataset.py  PromptDataset.generate_prompts  -- build the prompts to run.   [required]
+  2. src/inference.py      find_answer_span                -- locate the answer token in the generation.
+  3. src/inference.py      find_positions_of_interest      -- prompt positions to capture (--capture-geometry).
+  4. src/utils/parser.py   add_arguments                   -- add any task-specific CLI arguments.
+  5. src/utils/dir.py      generate_output_path            -- name your saved output files.
+  6. "Intervention mode" below                             -- the format of your --intervention spec file.
+
+To train a small model from scratch first, see src/train/ (tokenizer -> dataset -> model),
+which has its own TODO markers.
+=======================================================================================
 """
 
 import argparse
@@ -21,6 +37,7 @@ import utils
 from model import LargeLanguageModel
 
 if __name__ == "__main__":
+    # 1. Parse CLI arguments (defined in src/utils/parser.py).
     parser = argparse.ArgumentParser(
         description="Run inference capturing MLP neuron and attention head activations.",
     )
@@ -28,6 +45,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
+    # 2. Seed every RNG so a run is reproducible (same seed -> same prompts and same outputs).
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -35,6 +53,7 @@ if __name__ == "__main__":
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
+    # 3. Load the model. --quantize enables 4-bit loading (BitsAndBytes) to fit larger models in memory.
     bnb_config = (
         BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.float16)
         if args.quantize
@@ -46,73 +65,54 @@ if __name__ == "__main__":
         device=device,
     )
 
+    # 4. Choose which decoder layers to capture from (--layers; None = all of them).
     layers = llm.get_layers(args.layers)
 
-    dataset = utils.dataset.PromptDataset.generate_prompts(
-        num_prompts=args.num_prompts,
-        few_shot_examples=args.few_shot_examples,
-        overloading=True,
-        operator=args.operator,
-        overloading_operator=args.overloading_operator,
-        max_digits=args.max_digits,
-        reverse=args.reverse,
-        pad_zero=args.pad_zero,
-    )
+    # 5. Build the prompts to run on. TODO: implement PromptDataset.generate_prompts (src/utils/dataset.py).
+    # If your task needs extra parameters (operator, few-shot count, ...), add them as CLI args in
+    # src/utils/parser.py and forward them here.
+    dataset = utils.dataset.PromptDataset.generate_prompts(num_prompts=args.num_prompts)
 
-    # Baseline run
+    # 6. Baseline run: generate on every prompt and capture activations (no ablation here).
     result = inference.run(
         llm,
         dataset,
         layers,
         args.max_new_tokens,
-        operator=args.operator,
         capture_geometry=args.capture_geometry,
     )
 
-    # Output path
-    model_name = args.model_path.replace("/", "--")
-    op = utils.dataset.PromptDataset.OPERATOR_SYMBOL_TO_NAME_MAP.get(args.operator, args.operator)
-    oop = utils.dataset.PromptDataset.OPERATOR_SYMBOL_TO_NAME_MAP.get(
-        args.overloading_operator, args.overloading_operator
-    )
-    intervention = args.intervention is not None
-    fname = (
-        f"[m={model_name}]_[p={args.num_prompts}]_[fs={args.few_shot_examples}]"
-        f"_[rv={args.reverse}]_[pz={args.pad_zero}]"
-        f"_[op={op}]_[oop={oop}]_[int={intervention}].pt"
-    )
-    if args.output is not None:
-        output_path = Path(args.output) / fname
-    else:
-        output_path = Path(fname)
+    # 7. Decide where to save (src/utils/dir.py builds a filename from the run's parameters).
+    output_path = Path(utils.dir.generate_output_path(args))
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Normal mode
+    # 8a. Normal mode: just save the baseline activations plus run metadata.
     if args.intervention is None:
         save_data = {
             "result": result,
             "metadata": {
                 "model_path": args.model_path,
                 "num_prompts": args.num_prompts,
-                "few_shot_examples": args.few_shot_examples,
                 "num_layers": len(layers),
                 "layer_indices": list(layers.keys()),
-                "operator": args.operator,
-                "overloading_operator": args.overloading_operator,
                 "max_new_tokens": args.max_new_tokens,
-                "max_digits": args.max_digits,
-                "reverse": args.reverse,
-                "pad_zero": args.pad_zero,
                 "num_attention_heads": llm.num_attention_heads,
                 "head_dim": llm.head_dim,
             },
         }
 
-    # Intervention mode
+    # 8b. Intervention mode: re-run the prompts many times, each with one component knocked out,
+    #     to measure which components causally matter. Results are saved alongside the baseline.
     else:
+        # TODO: this parses the --intervention spec format from the original study, where
+        # analysis.json lists, per layer, the important features found via Lasso ("std"/"over"),
+        # split into MLP neurons vs attention heads by the "num_mlp_neurons" boundary. Each feature
+        # is then ablated individually (a sweep). Adapt this block to read YOUR spec format and to
+        # build the {layer_idx: [indices]} ablation dicts you want to pass to inference.run.
         with open(args.intervention) as f:
             analysis = json.load(f)
 
+        # Feature indices below num_mlp are MLP neurons; the rest are attention heads (offset by num_mlp).
         num_mlp = analysis["num_mlp_neurons"]
         ablations: list[dict] = []
 
@@ -139,7 +139,6 @@ if __name__ == "__main__":
                     dataset,
                     layers,
                     args.max_new_tokens,
-                    operator=args.operator,
                     mlp_ablation=mlp_abl,
                     head_ablation=head_abl,
                     capture_geometry=args.capture_geometry,
@@ -162,15 +161,9 @@ if __name__ == "__main__":
             "metadata": {
                 "model_path": args.model_path,
                 "num_prompts": args.num_prompts,
-                "few_shot_examples": args.few_shot_examples,
                 "num_layers": len(layers),
                 "layer_indices": list(layers.keys()),
-                "operator": args.operator,
-                "overloading_operator": args.overloading_operator,
                 "max_new_tokens": args.max_new_tokens,
-                "max_digits": args.max_digits,
-                "reverse": args.reverse,
-                "pad_zero": args.pad_zero,
                 "num_attention_heads": llm.num_attention_heads,
                 "head_dim": llm.head_dim,
                 "intervention": args.intervention,

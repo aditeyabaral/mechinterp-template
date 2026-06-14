@@ -45,16 +45,25 @@ _VOCAB = {tok: i for i, tok in enumerate(_SPECIAL_TOKENS + VOCAB_CHARS)}
 
 
 def build_tokenizer() -> PreTrainedTokenizerFast:
-    """Build a deterministic character-level tokenizer over VOCAB_CHARS."""
+    """Build a deterministic character-level tokenizer over VOCAB_CHARS.
+
+    A tokenizer maps text <-> integer token IDs. Here we use the simplest possible scheme:
+    one token per character (a WordLevel vocab plus a Split pre-tokenizer that isolates every
+    single character). This is ideal for small synthetic tasks because it's transparent and has
+    a tiny vocabulary -- no subword merges to reason about. The Fuse decoder just glues the
+    characters back together when decoding.
+    """
     tok_obj = Tokenizer(WordLevel(vocab=_VOCAB, unk_token="<unk>"))
     tok_obj.pre_tokenizer = Split(pattern=Regex(r"[\s\S]"), behavior="isolated")
     tok_obj.decoder = Fuse()
+    # Wrap in a PreTrainedTokenizerFast so it behaves like any HuggingFace tokenizer (padding,
+    # special tokens, save/push_to_hub, etc.).
     return PreTrainedTokenizerFast(
         tokenizer_object=tok_obj,
-        bos_token="<bos>",
-        eos_token="<eos>",
-        pad_token="<pad>",
-        unk_token="<unk>",
+        bos_token="<bos>",  # beginning-of-sequence
+        eos_token="<eos>",  # end-of-sequence (the model learns to emit this to stop)
+        pad_token="<pad>",  # fills short sequences so a batch is rectangular
+        unk_token="<unk>",  # stands in for any character not in VOCAB_CHARS
     )
 
 

@@ -41,15 +41,25 @@ class LargeLanguageModel:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModelForCausalLM.from_pretrained(
             model_path,
-            quantization_config=bnb_config,
-            attn_implementation="eager",
-            dtype="auto",
-            device_map="auto",
+            quantization_config=bnb_config,  # optional 4-bit quantization to fit bigger models in memory
+            attn_implementation="eager",  # plain attention so output_attentions works (to read attention weights)
+            dtype="auto",  # use the checkpoint's native precision
+            device_map="auto",  # let accelerate place the model on GPU(s)/CPU automatically
         )
-        self.model.eval()
+        self.model.eval()  # inference mode: disable dropout, etc. (we are not training here)
+
+    # --------------------------------------------------------------------- #
+    # Architecture-specific accessors (GPT-2).
+    #
+    # These four methods are the ONLY place that knows the model's module layout.
+    # Everything else in this file and in model/hooks is architecture-agnostic.
+    # To target a different decoder-only architecture, update just these:
+    #   GPT-2 transformer.h / mlp.c_proj / attn.c_proj / transformer.wte
+    #   (Llama would be model.layers / mlp.down_proj / self_attn.o_proj / embed_tokens).
+    # --------------------------------------------------------------------- #
 
     def _decoder_blocks(self) -> list[nn.Module]:
-        """Return the list of decoder block modules (architecture-specific; GPT-2: transformer.h)."""
+        """Return the list of decoder block (layer) modules in order (GPT-2: transformer.h)."""
         return list(self.model.transformer.h)
 
     def get_layers(self, layers: list[int] | None) -> dict[int, nn.Module]:
@@ -162,24 +172,34 @@ class LargeLanguageModel:
             logits (Tensor): [seq_len_generated, vocab_size] logits per token.
             attentions (dict): A dictionary mapping layer indices to lists of attention tensors.
             output_ids (Tensor): [prompt + seq_len_generated] token IDs.
+
+        Why we hand-roll the loop instead of calling model.generate(): writing the decoding
+        loop ourselves means our hooks fire on each forward pass in a predictable way, and we
+        get the per-step logits/attentions we want for analysis.
         """
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
         input_ids = inputs["input_ids"]  # [1, seq_len]
-        generated_ids = input_ids.clone()
+        generated_ids = input_ids.clone()  # grows by one token each step
 
         logits_generated = []
         attentions_generated = dict()
         output_attns = attention_layers is not None and len(attention_layers) > 0
-        # Greedy decoding loop
+        # Greedy decoding: at each step take the single most-likely next token (argmax), append
+        # it, and feed it back in. no_grad() since we never backprop during analysis.
         with torch.no_grad():
             past_key_values = None
             next_token_id = None
             for step in range(max_new_tokens):
                 if step == 0:
+                    # Step 0: run the FULL prompt through the model in one forward pass.
+                    # This is the pass our extraction hooks read prompt-position activations from.
                     outputs = self.model(
                         input_ids=generated_ids, past_key_values=None, use_cache=True, output_attentions=output_attns
                     )
                 else:
+                    # Later steps: feed ONLY the one new token. The KV cache (past_key_values)
+                    # holds the keys/values for all previous positions, so we don't recompute
+                    # the whole sequence each time -- a standard generation speed-up.
                     outputs = self.model(
                         input_ids=next_token_id.unsqueeze(0),  # Only the new token [1, 1]
                         past_key_values=past_key_values,  # Reuse cached keys/values
@@ -206,14 +226,15 @@ class LargeLanguageModel:
                         token_attention = layer_attention[0, :, -1, :].detach().cpu()
                         attentions_generated[layer_idx].append(token_attention)
 
-                # Take last token's logits
+                # The model outputs a logit (score) for every vocab token at every position;
+                # the prediction for the NEXT token lives at the last position.
                 next_token_logits = logits[:, -1, :]  # [1, vocab_size]
                 logits_generated.append(next_token_logits.squeeze(0).detach().cpu())
-                # Greedy selection
+                # Greedy selection: pick the single highest-scoring token (deterministic, no sampling).
                 next_token_id = next_token_logits.argmax(dim=-1)  # [1]
-                # Append token
+                # Append it to the running sequence; it becomes next step's input.
                 generated_ids = torch.cat([generated_ids, next_token_id.unsqueeze(0)], dim=-1)
-                # Stop if EOS token generated
+                # Stop early if the model emits the end-of-sequence token.
                 if next_token_id.item() == self.tokenizer.eos_token_id:
                     break
 

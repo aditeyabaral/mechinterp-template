@@ -218,20 +218,22 @@ if __name__ == "__main__":
     print(f"  bos_token_id       : {tokenizer.bos_token_id}")
     print(f"  eos_token_id       : {tokenizer.eos_token_id}")
 
-    # Config -- a GPT-2 architecture sized down to the values below.
+    # Config -- a GPT-2 architecture sized down to the values below. Tune these (via CLI args)
+    # to control how big your model is: more layers/heads/width = more capacity but slower.
     config = GPT2Config(
-        vocab_size=len(tokenizer),
-        n_embd=args.hidden_size,
-        n_inner=args.intermediate_size,
-        n_layer=args.num_hidden_layers,
-        n_head=args.num_attention_heads,
-        n_positions=args.max_position_embeddings,
+        vocab_size=len(tokenizer),  # must match the tokenizer so the embedding/output sizes line up
+        n_embd=args.hidden_size,  # width of the residual stream (hidden_size)
+        n_inner=args.intermediate_size,  # width of each MLP's hidden layer
+        n_layer=args.num_hidden_layers,  # number of transformer blocks (depth)
+        n_head=args.num_attention_heads,  # attention heads per block
+        n_positions=args.max_position_embeddings,  # max sequence length the model can handle
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
     )
 
-    # Model
+    # from_config builds the model with RANDOM weights (training "from scratch"), as opposed to
+    # from_pretrained which would download trained weights. We want a fresh model to train ourselves.
     model = AutoModelForCausalLM.from_config(config)
     model.to(device)
 
@@ -256,13 +258,18 @@ if __name__ == "__main__":
     raw_val = load_dataset(DATASET_NAME, DATASET_CONFIG, split="validation")
 
     def tokenize(batch: dict) -> dict:
-        """Concatenate prompt and answer, append EOS, then tokenize."""
+        """Turn each (prompt, answer) pair into one token sequence the model learns to predict.
+
+        We train on the full string "prompt + answer + EOS". The model learns next-token
+        prediction over the whole thing, so it learns both to continue prompts and to stop (EOS).
+        """
         texts = [p + a + tokenizer.eos_token for p, a in zip(batch["prompt"], batch["answer"])]
         return tokenizer(texts, truncation=True, max_length=args.max_position_embeddings)
 
     tokenized_train = raw_train.map(tokenize, batched=True, remove_columns=raw_train.column_names)
 
-    # Training
+    # The collator pads each batch to equal length and (mlm=False -> causal LM) creates the
+    # training labels as the input shifted by one, i.e. "predict the next token at every position".
     collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     cuda_available = torch.cuda.is_available()

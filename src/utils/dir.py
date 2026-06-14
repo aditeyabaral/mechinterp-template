@@ -1,8 +1,8 @@
 """Build the output path/filename for saved inference results.
 
-Implement `generate_output_path` to encode a run's parameters into a filename so
-that different runs don't overwrite each other. The operator-overloading arithmetic
-study's version is kept below as a commented example.
+`generate_output_path` has a sensible default (model name + #prompts), so the pipeline
+runs as-is. Customize it to encode more of your run's parameters into the filename so
+different runs don't overwrite each other. The arithmetic study's version is in comments.
 """
 
 import argparse
@@ -11,7 +11,7 @@ import argparse
 def generate_output_path(args: argparse.Namespace) -> str:
     """Generate the output path for a run's results.
 
-    If `args.output` is set, it is honored directly. Otherwise, build a filename
+    If `args.output` is set, it is honored directly. Otherwise, a filename is built
     from the run parameters in `args`.
 
     Args:
@@ -24,18 +24,16 @@ def generate_output_path(args: argparse.Namespace) -> str:
         return args.output
 
     # ----------------------------------------------------------------------- #
-    # TODO: build a filename that captures this run's parameters.
+    # TODO: customize the filename to capture this run's parameters so that
+    # different runs don't overwrite each other. The default below uses just the
+    # model name and prompt count.
     # ----------------------------------------------------------------------- #
     #
-    # Example (operator-overloading arithmetic study):
-    #
-    #     def _sanitize_model_path(s: str) -> str:
-    #         return str(s).replace("/", "--")
+    # Example (operator-overloading arithmetic study), adding the operators used:
     #
     #     components = [
-    #         f"[m={_sanitize_model_path(args.model_path)}]",
+    #         f"[m={model_name}]",
     #         f"[p={args.num_prompts}]",
-    #         f"[fs={args.few_shot_examples}]",
     #         f"[op={args.operator}]",
     #     ]
     #     if args.overloading_operator is not None:
@@ -43,4 +41,6 @@ def generate_output_path(args: argparse.Namespace) -> str:
     #     return "_".join(components) + ".pt"
     #
     # ----------------------------------------------------------------------- #
-    raise NotImplementedError("Implement generate_output_path() for your task -- see the example in comments.")
+    model_name = str(args.model_path).replace("/", "--")
+    intervention = getattr(args, "intervention", None) is not None
+    return f"[m={model_name}]_[p={args.num_prompts}]_[int={intervention}].pt"

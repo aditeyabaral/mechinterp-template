@@ -1,4 +1,11 @@
-"""Inference loop capturing MLP intermediate neuron activations and per-head attention outputs."""
+"""Inference loop capturing MLP intermediate neuron activations and per-head attention outputs.
+
+This file works on any decoder-only model out of the box. Two functions are the task-specific
+override points you may want to customise (both have sensible defaults and `TODO` markers):
+  - find_answer_span(generated_text):       which span of the generation is "the answer".
+  - find_positions_of_interest(tok, prompt): which prompt token positions to capture for geometry.
+Everything else (the capture stores, ablation hooks, and the run loop) is task-agnostic.
+"""
 
 import re
 from typing import Any
@@ -18,6 +25,65 @@ from model.hooks import (
     MultiLayerActivationStore,
 )
 from utils.dataset import PromptDataset
+
+
+def find_answer_span(generated_text: str) -> tuple[str, int, int] | None:
+    """Locate the model's answer within the generated text.
+
+    The default takes the first whitespace-delimited token of the generation, which
+    is a reasonable target for single-token answers. Override for your task.
+
+    Args:
+        generated_text: The decoded text generated after the prompt.
+
+    Returns:
+        (answer_text, start_char, end_char) within generated_text, or None if not found.
+    """
+    # TODO: customise how the answer is located in the generation for your task.
+    # Example (operator-overloading arithmetic study): match a signed integer, handling
+    # both normal format (e.g. "-46") and reverse-trained format (e.g. "64-"):
+    #     match = re.search(r"^\s*([+-]?\d+[+-]?)", generated_text)
+    match = re.search(r"^\s*(\S+)", generated_text)
+    if not match:
+        return None
+    return match.group(1), match.start(1), match.end(1)
+
+
+def find_positions_of_interest(tokenizer: PreTrainedTokenizerFast, prompt: str) -> dict[str, int | None]:
+    """Return a mapping {name: prompt_token_index} of positions to capture for --capture-geometry.
+
+    These prompt token positions are captured (residual / MLP / heads / embedding) in
+    addition to the answer token. The default is no extra positions; override for your task.
+
+    Args:
+        tokenizer: The model's tokenizer (use return_offsets_mapping to locate tokens).
+        prompt: The full prompt string.
+
+    Returns:
+        dict mapping a position name to a token index within the prompt (or None).
+    """
+    # ----------------------------------------------------------------------- #
+    # TODO: return the prompt token positions of interest for your task.
+    # ----------------------------------------------------------------------- #
+    #
+    # Example (operator-overloading arithmetic study), capturing the two operands,
+    # the operator, and the '=' of the final 'a<op>b=' question:
+    #
+    #     enc = tokenizer(prompt, return_offsets_mapping=True, return_tensors="pt")
+    #     offsets = enc["offset_mapping"][0].tolist()
+    #
+    #     def char_to_token(char_pos: int) -> int | None:
+    #         for tok_idx, (start, end) in enumerate(offsets):
+    #             if start <= char_pos < end:
+    #                 return tok_idx
+    #         return None
+    #
+    #     # locate the char positions of the operands / operator / '=' in `prompt`,
+    #     # map each via char_to_token(...), and return them by name:
+    #     return {"operand_a": ia, "operand_b": ib, "operator": iop, "eq_sign": ieq}
+    #
+    # ----------------------------------------------------------------------- #
+    return {}
 
 
 def _map_char_to_token_position(
@@ -56,8 +122,8 @@ def _extract_answer_token_tensors(  # noqa: C901
 ):
     """Extract token probabilities, activations, and attention for the answer token.
 
-    For use with PROMPT_TEMPLATE_SMALL_LM, where the prompt ends with '=' and the
-    model generates the numerical answer directly (e.g. '42'), with no 'Answer: ' prefix.
+    The answer span within the generated text is located by `find_answer_span`
+    (override that for your task), then mapped back to token positions.
 
     Passing empty dicts ({}) for activations and attentions is valid: the function
     will return empty dicts for answer_activations and answer_attention, while still
@@ -97,16 +163,10 @@ def _extract_answer_token_tensors(  # noqa: C901
         return _none_tuple(activations, attentions)
     generated_text = llm.tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-    # Prompt ends with "="; model generates the answer number immediately.
-    # Handles both normal format (e.g. "-46") and reverse-trained format (e.g. "64-").
-    pattern = r"^\s*([+-]?\d+[+-]?)"
-    match = re.search(pattern, generated_text)
-    if not match:
+    span = find_answer_span(generated_text)
+    if span is None:
         return _none_tuple(activations, attentions)
-
-    answer_text = match.group(1)
-    answer_start_char = match.start(1)
-    answer_end_char = match.end(1)
+    answer_text, answer_start_char, answer_end_char = span
 
     answer_start_token = _map_char_to_token_position(llm.tokenizer, generated_ids, answer_start_char)
     answer_end_token = _map_char_to_token_position(llm.tokenizer, generated_ids, answer_end_char - 1)
@@ -160,75 +220,12 @@ def _extract_answer_token_tensors(  # noqa: C901
     )
 
 
-def _find_token_positions(
-    tokenizer: PreTrainedTokenizerFast,
-    full_prompt: str,
-    question: str,
-    operator: str,
-) -> tuple[int | None, int | None, int | None, int | None]:
-    r"""Find token positions for operand A (last digit), operand B (last digit), operator, and '='.
-
-    The full prompt ends with '\n{question}='. We locate the last occurrence of the
-    question string, parse the two operands from it using the operator, then find the
-    character positions of their last digits, the operator symbol, and the '=' sign,
-    and map those to token indices via the tokenizer's offset mapping.
-
-    Args:
-        tokenizer: The model's tokenizer (must support return_offsets_mapping).
-        full_prompt: The complete prompt string including the trailing '='.
-        question: The question expression, e.g. '023+045' (no '=' suffix).
-        operator: The operator symbol used to split operands, e.g. '+'.
-
-    Returns:
-        (pos_a, pos_b, pos_op, pos_eq): Token indices in the prompt for the last digit of
-        operand A, the last digit of operand B, the operator symbol, and the '=' sign.
-        Any may be None if the position cannot be determined.
-    """
-    try:
-        question_start_char = full_prompt.rfind(question)
-        if question_start_char == -1:
-            return None, None, None, None
-
-        op_idx = question.index(operator)
-        operand_a_str = question[:op_idx]
-        # Last char of operand A: question_start + end of operand A - 1
-        char_pos_a = question_start_char + len(operand_a_str) - 1
-        # First char of operator
-        char_pos_op = question_start_char + op_idx
-        # Last char of operand B: question_start + end of question - 1
-        char_pos_b = question_start_char + len(question) - 1
-        # '=' is the last character of the full prompt
-        char_pos_eq = len(full_prompt) - 1
-
-        encoding = tokenizer(full_prompt, return_offsets_mapping=True, return_tensors="pt")
-        offsets = encoding["offset_mapping"][0].tolist()  # [(start, end), ...]
-
-        def _char_to_token(char_pos: int) -> int | None:
-            for tok_idx, (start, end) in enumerate(offsets):
-                if start <= char_pos < end:
-                    return tok_idx
-            return None
-
-        return (
-            _char_to_token(char_pos_a),
-            _char_to_token(char_pos_b),
-            _char_to_token(char_pos_op),
-            _char_to_token(char_pos_eq),
-        )
-
-    except (ValueError, IndexError):
-        return None, None, None, None
-
-
 def _extract_all_activations(  # noqa: C901
     activations: dict[int, list[torch.Tensor]],
     mlp_store: MlpNeuronExtractionStore,
     head_store: AttentionHeadExtractionStore,
     layer_indices: list[int],
-    pos_a: int | None,
-    pos_b: int | None,
-    pos_op: int | None,
-    pos_eq: int | None,
+    positions: dict[str, int | None],
     embedding_tensor: torch.Tensor | None = None,
 ) -> dict[str, dict[int, dict[str, torch.Tensor | None]]]:
     """Extract residual stream, MLP neuron, and attention head activations at prompt token positions.
@@ -248,24 +245,16 @@ def _extract_all_activations(  # noqa: C901
         mlp_store: MLP intermediate activation store (hooked for the forward pass).
         head_store: Attention head activation store (hooked for the forward pass).
         layer_indices: Layer indices to extract from.
-        pos_a: Token index of the last digit of operand A.
-        pos_b: Token index of the last digit of operand B.
-        pos_op: Token index of the operator symbol.
-        pos_eq: Token index of the '=' sign.
+        positions: Mapping {name: token_index} of prompt positions to capture (from
+            find_positions_of_interest); any index may be None.
         embedding_tensor: Optional [prompt_len, hidden_size] tensor from the token embedding
             layer (embed_tokens output at step 0). If provided, stored at layer_idx=-1.
 
     Returns:
-        dict with keys 'operand_a', 'operand_b', 'operator', 'eq_sign'. Each maps
-        layer_idx -> {"residual": Tensor | None, "mlp": Tensor | None, "heads": Tensor | None}.
+        dict mapping each position name to layer_idx ->
+        {"residual": Tensor | None, "mlp": Tensor | None, "heads": Tensor | None}.
         layer_idx=-1 holds the pre-transformer token embedding (residual only, mlp/heads=None).
     """
-    positions = {
-        "operand_a": pos_a,
-        "operand_b": pos_b,
-        "operator": pos_op,
-        "eq_sign": pos_eq,
-    }
     geometry: dict[str, dict] = {name: {} for name in positions}
 
     # Populate layer_idx=-1 with the token embedding (pre-transformer representation).
@@ -413,8 +402,6 @@ def _run_single_prompt(  # noqa: C901
     llm: LargeLanguageModel,
     prompt: str,
     prompt_length: int,
-    question: str,
-    operator: str,
     layers: dict[int, nn.Module],
     down_proj_layers: dict[int, nn.Module],
     o_proj_layers: dict[int, nn.Module],
@@ -427,18 +414,17 @@ def _run_single_prompt(  # noqa: C901
 
     Args:
         llm: The large language model.
-        prompt: Full prompt string (few-shot examples + question + '=').
+        prompt: Full prompt string.
         prompt_length: Number of tokens in the prompt.
-        question: The bare question expression, e.g. '023+045'.
-        operator: Operator symbol used to split operands for geometry extraction.
         layers: Transformer layer modules for residual-stream extraction.
-        down_proj_layers: Dict mapping layer_idx to mlp.down_proj modules.
-        o_proj_layers: Dict mapping layer_idx to self_attn.o_proj modules.
+        down_proj_layers: Dict mapping layer_idx to MLP neuron-projection modules.
+        o_proj_layers: Dict mapping layer_idx to attention output-projection modules.
         max_new_tokens: Maximum tokens to generate.
         mlp_ablation: Optional dict mapping layer_idx to MLP neuron indices to zero out.
         head_ablation: Optional dict mapping layer_idx to attention head indices to zero out.
-        capture_geometry: If True, extract step-0 activations at operand/operator/'=' positions
-            and store output_ids. Set to False during ablation sweeps to reduce stored data.
+        capture_geometry: If True, extract step-0 activations at the positions returned by
+            find_positions_of_interest and store output_ids. Set to False during ablation
+            sweeps to reduce stored data.
 
     Returns:
         Dict with keys: text, completion, output_ids (None when capture_geometry=False), and
@@ -447,32 +433,40 @@ def _run_single_prompt(  # noqa: C901
     """
     layer_indices = list(layers.keys())
 
-    # Ablation hooks register FIRST; extraction stores register AFTER (when used).
-    # PyTorch fires pre-hooks in registration order, so ablation zeroes the
-    # tensor before the extraction store captures it.
+    # ORDER MATTERS. Register ablation hooks FIRST, extraction stores SECOND. PyTorch fires
+    # pre-hooks in registration order, so the ablation zeroes the tensor before the store
+    # records it -- meaning the store captures the activations that *actually* flowed through
+    # the model (post-ablation), not the originals.
     _ablation_hooks = _register_ablation_hooks(llm, down_proj_layers, o_proj_layers, mlp_ablation, head_ablation)
 
+    # Attach the capture stores. When capture_geometry is False (e.g. during a big ablation
+    # sweep) we attach empty no-op stores so we only pay for the residual stream + logits and
+    # skip the heavier per-neuron / per-head / embedding capture.
     if capture_geometry:
         mlp_store = MlpNeuronExtractionStore(down_proj_layers)
         head_store = AttentionHeadExtractionStore(o_proj_layers, llm.num_attention_heads, llm.head_dim)
-        emb_store = MultiLayerActivationStore({-1: llm.get_embedding_layer()})
+        emb_store = MultiLayerActivationStore({-1: llm.get_embedding_layer()})  # key -1 = token embedding
     else:
         mlp_store = MlpNeuronExtractionStore({})
         head_store = AttentionHeadExtractionStore({}, llm.num_attention_heads, llm.head_dim)
         emb_store = None
 
-    (
-        activations,
-        generated_text,
-        completion,
-        logits,
-        attentions,
-        output_ids,
-    ) = llm.extract_activations(prompt, layers, max_new_tokens=max_new_tokens)
+    # Generate. This single call runs the whole decoding loop; every hook above fires on each
+    # forward pass and fills its store. `activations` is the residual stream (per layer, per step).
+    result = llm.extract_activations(prompt, layers, max_new_tokens=max_new_tokens)
+    activations = result["activations"]
+    generated_text = result["generated_text"]
+    completion = result["completion"]
+    logits = result["logits"]
+    attentions = result["attentions"]
+    output_ids = result["output_ids"]
 
+    # Ablation hooks have done their job for this prompt; detach them so they don't fire again.
     for hook in _ablation_hooks:
         hook.remove()
 
+    # Locate "the answer" inside the generated text (via find_answer_span) and translate that
+    # into a token position in the full output sequence, so we know WHERE to read activations.
     (
         _,
         _,
@@ -491,6 +485,8 @@ def _run_single_prompt(  # noqa: C901
     )
 
     if capture_geometry and answer_position_in_output is not None:
+        # Positions in the stores are indexed by generation step. The answer's absolute
+        # position minus the prompt length gives its index among the generated tokens.
         answer_pos_in_gen = answer_position_in_output - prompt_length
         mlp_neurons, attn_heads = _extract_neuron_tensors_at_position(
             mlp_store, head_store, answer_pos_in_gen, layer_indices
@@ -523,7 +519,7 @@ def _run_single_prompt(  # noqa: C901
                 elif t.dim() == 2:
                     answer_embedding = t[-1, :].detach().clone().cpu()
 
-        pos_a, pos_b, pos_op, pos_eq = _find_token_positions(llm.tokenizer, prompt, question, operator)
+        positions = find_positions_of_interest(llm.tokenizer, prompt)
 
         # Extract prompt-phase embedding tensor: step-0 output of embed_tokens [prompt_len, hidden].
         step0_embedding: torch.Tensor | None = None
@@ -538,10 +534,7 @@ def _run_single_prompt(  # noqa: C901
             mlp_store,
             head_store,
             layer_indices,
-            pos_a,
-            pos_b,
-            pos_op,
-            pos_eq,
+            positions,
             embedding_tensor=step0_embedding,
         )
     else:
@@ -582,71 +575,43 @@ def run(
     dataset: PromptDataset,
     layers: dict[int, nn.Module],
     max_new_tokens: int,
-    operator: str = "",
     mlp_ablation: dict[int, list[int]] | None = None,
     head_ablation: dict[int, list[int]] | None = None,
     capture_geometry: bool = True,
 ) -> list[dict[str, Any]]:
-    """Run inference capturing MLP intermediate, per-head, and geometry activations.
+    """Run inference capturing MLP intermediate, per-head, residual, and geometry activations.
 
     Args:
         llm: The large language model.
-        dataset: Dataset of prompts to run.
+        dataset: Dataset whose `.prompts` is a list of prompt strings to run.
         layers: Transformer layer modules (used for residual stream extraction via extract_activations).
         max_new_tokens: Max tokens to generate per prompt.
-        operator: The arithmetic operator symbol (e.g. '+') used to split operands for
-            geometry extraction. If empty, geometry positions will all be None.
         mlp_ablation: Optional dict mapping layer_idx to list of MLP neuron indices to zero out
-            on every prompt. Applied to both original and overloaded runs.
+            on every prompt.
         head_ablation: Optional dict mapping layer_idx to list of attention head indices to zero out
-            on every prompt. Applied to both original and overloaded runs.
-        capture_geometry: If True, extract step-0 activations at operand/operator/'=' positions.
-            Set to False during ablation sweeps to avoid storing per-feature geometry data.
+            on every prompt.
+        capture_geometry: If True, capture step-0 activations at the answer token and at the
+            find_positions_of_interest positions. Set to False during ablation sweeps to avoid
+            storing per-feature geometry data.
 
     Returns:
-        List of result dicts, one per prompt. Each dict contains original and overloaded runs
-        with mlp_neurons and attn_heads at the answer token, plus geometry activations at
-        the operand and '=' positions.
+        List of result dicts, one per prompt, each with mlp_neurons and attn_heads at the
+        answer token plus geometry activations at the positions of interest.
     """
-    down_proj_layers = llm.get_mlp_down_proj_layers(list(layers.keys()))
-    o_proj_layers = llm.get_attn_o_proj_layers(list(layers.keys()))
+    # Resolve the concrete modules to hook once, up front (same for every prompt).
+    down_proj_layers = llm.get_mlp_neuron_layers(list(layers.keys()))
+    o_proj_layers = llm.get_attn_output_layers(list(layers.keys()))
 
+    # Process prompts one at a time, collecting one result dict per prompt.
     results: list[dict[str, Any]] = []
-    prompt_template = llm.PROMPT_TEMPLATE_SMALL_LM
-
     for prompt_idx, prompt in enumerate(tqdm(dataset.prompts, desc="Running neuron inference")):
-        prompt_original = prompt_template.format(
-            "\n".join(prompt.examples_original),
-            prompt.question,
-        )
-        prompt_original_length = len(llm.tokenizer(prompt_original, return_tensors="pt")["input_ids"][0])
+        # prompt_length (in tokens) marks the boundary between prompt and generated tokens.
+        prompt_length = len(llm.tokenizer(prompt, return_tensors="pt")["input_ids"][0])
 
-        prompt_overloaded = prompt_template.format(
-            "\n".join(prompt.examples_overloaded),
-            prompt.question,
-        )
-        prompt_overloaded_length = len(llm.tokenizer(prompt_overloaded, return_tensors="pt")["input_ids"][0])
-
-        original_run = _run_single_prompt(
+        run_result = _run_single_prompt(
             llm,
-            prompt_original,
-            prompt_original_length,
-            prompt.question,
-            operator,
-            layers,
-            down_proj_layers,
-            o_proj_layers,
-            max_new_tokens,
-            mlp_ablation=mlp_ablation,
-            head_ablation=head_ablation,
-            capture_geometry=capture_geometry,
-        )
-        overloaded_run = _run_single_prompt(
-            llm,
-            prompt_overloaded,
-            prompt_overloaded_length,
-            prompt.question,
-            operator,
+            prompt,
+            prompt_length,
             layers,
             down_proj_layers,
             o_proj_layers,
@@ -659,14 +624,9 @@ def run(
         results.append(
             {
                 "prompt_idx": prompt_idx,
-                "prompt_original": prompt_original,
-                "prompt_overloaded": prompt_overloaded,
-                "prompt_original_length": prompt_original_length,
-                "prompt_overloaded_length": prompt_overloaded_length,
-                "answer_original": prompt.answer_original,
-                "answer_overloaded": prompt.answer_overloaded,
-                "original": original_run,
-                "overloaded": overloaded_run,
+                "prompt": prompt,
+                "prompt_length": prompt_length,
+                "result": run_result,
             }
         )
 

@@ -57,9 +57,8 @@ def find_answer_span(generated_text: str) -> tuple[str, int, int] | None:
     # end) of the answer substring, or None to skip the prompt. The default below works for many
     # short answers; only change it if your answer format needs something more specific.
     #
-    # Example (operator-overloading arithmetic study): match a signed integer, handling both the
-    # normal format (e.g. "-46") and the reverse-digit training format (e.g. "64-"):
-    #     match = re.search(r"^\s*([+-]?\d+[+-]?)", generated_text)
+    # Example (an arithmetic task whose answer is an integer, possibly negative, e.g. "12" or "-46"):
+    #     match = re.search(r"^\s*(-?\d+)", generated_text)
     match = re.search(r"^\s*(\S+)", generated_text)
     if not match:
         return None
@@ -92,8 +91,8 @@ def find_positions_of_interest(model: TransformerBridge, prompt: str) -> dict[st
     #     {"operator": 5, "first_operand": 3}. Leave it returning {} to capture only the answer.
     # ----------------------------------------------------------------------------------- #
     #
-    # Example (operator-overloading arithmetic study), capturing the operator and the '=' of the
-    # final 'a<op>b=' question by scanning the per-token strings of the prompt:
+    # Example (a single-digit addition task with prompts like "7+5="), capturing the '+' operator
+    # and the '=' sign by scanning the per-token strings of the prompt:
     #
     #     str_tokens = model.to_str_tokens(prompt, prepend_bos=False)  # ["7", "+", "5", "=", ...]
     #     positions: dict[str, int | None] = {}

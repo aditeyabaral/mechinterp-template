@@ -116,20 +116,18 @@ class GenerationEvalTrainer(Trainer):
             # ------------------------------------------------------------------- #
             # `results` is in the same order as `eval_dataset`, so you can split it
             # by any category column on the val rows. This block is drop-in: paste
-            # it right here. Example from the operator-overloading study, where rows
-            # carry "base_operation"/"target_operation" and a row is "overloaded"
-            # when they differ:
+            # it right here. Example for a single-digit addition task, reporting
+            # accuracy separately for sums that carry (answer >= 10) vs those that
+            # don't -- assuming each val row has an integer "answer" column:
             #
-            #     base = eval_dataset["base_operation"]
-            #     target = eval_dataset["target_operation"]
-            #     standard = [r for k, r in enumerate(results) if base[k] == target[k]]
-            #     overloaded = [r for k, r in enumerate(results) if base[k] != target[k]]
-            #     metrics[f"{metric_key_prefix}_standard_accuracy"] = (
-            #         sum(r["predicted"] == r["answer"] for r in standard) / len(standard) if standard else float("nan")
+            #     answers = [int(x) for x in eval_dataset["answer"]]
+            #     no_carry = [r for k, r in enumerate(results) if answers[k] < 10]
+            #     carry = [r for k, r in enumerate(results) if answers[k] >= 10]
+            #     metrics[f"{metric_key_prefix}_no_carry_accuracy"] = (
+            #         sum(r["predicted"] == r["answer"] for r in no_carry) / len(no_carry) if no_carry else float("nan")
             #     )
-            #     metrics[f"{metric_key_prefix}_overloaded_accuracy"] = (
-            #         sum(r["predicted"] == r["answer"] for r in overloaded) / len(overloaded)
-            #         if overloaded else float("nan")
+            #     metrics[f"{metric_key_prefix}_carry_accuracy"] = (
+            #         sum(r["predicted"] == r["answer"] for r in carry) / len(carry) if carry else float("nan")
             #     )
             # ------------------------------------------------------------------- #
 

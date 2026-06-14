@@ -11,8 +11,8 @@ TODO (you must implement this for your task):
 
 The HF Hub repo to push to is passed via --hub-name on the command line.
 
-See the commented-out example below, taken from the operator-overloading
-arithmetic study this template was derived from.
+See the commented-out example below for a small self-contained illustration
+(a single-digit arithmetic task).
 """
 
 import argparse
@@ -37,12 +37,12 @@ from transformers import PreTrainedTokenizerFast
 #                 round-trips exactly -- a quick sanity check that your vocab is complete.
 # --------------------------------------------------------------------------- #
 #
-# Example (arithmetic study):
-# VOCAB_CHARS = sorted("0123456789$+-*/%=\n")
+# Example (a single-digit addition task with prompts like "7+5="):
+# VOCAB_CHARS = sorted("0123456789+=\n")
 # SAMPLE_TEXTS = [
 #     "2+3=5\n",
-#     "12+34=46\n",
-#     "9*1=9\n4*1=4\n2*4=8\n6*4=24\n5*6=30\n1*8=8\n9*8=72\n9*8=72\n9*0=",
+#     "7+5=12\n",
+#     "1+1=2\n4+0=4\n2+6=8\n6+4=10\n5+6=11\n8+1=9\n9+8=17\n3+3=",
 # ]
 
 VOCAB_CHARS: list[str] = []

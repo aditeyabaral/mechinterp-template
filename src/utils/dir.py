@@ -2,7 +2,7 @@
 
 `generate_output_path` has a sensible default (model name + #prompts), so the pipeline
 runs as-is. Customize it to encode more of your run's parameters into the filename so
-different runs don't overwrite each other. The arithmetic study's version is in comments.
+different runs don't overwrite each other. A small worked example is in comments.
 """
 
 import argparse
@@ -29,15 +29,13 @@ def generate_output_path(args: argparse.Namespace) -> str:
     # model name and prompt count.
     # ----------------------------------------------------------------------- #
     #
-    # Example (operator-overloading arithmetic study), adding the operators used:
+    # Example (a task with an extra --max-digits argument), encoding it into the filename:
     #
     #     components = [
     #         f"[m={model_name}]",
     #         f"[p={args.num_prompts}]",
-    #         f"[op={args.operator}]",
+    #         f"[digits={args.max_digits}]",
     #     ]
-    #     if args.overloading_operator is not None:
-    #         components.append(f"[oop={args.overloading_operator}]")
     #     return "_".join(components) + ".pt"
     #
     # ----------------------------------------------------------------------- #

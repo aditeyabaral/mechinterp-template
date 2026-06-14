@@ -2,8 +2,7 @@
 
 The generic run arguments (model, layers, output, ...) are provided as-is. Add any
 task-specific arguments your prompts or analysis need in the marked TODO section;
-the operator-overloading arithmetic study's arguments are kept below as a commented
-example.
+a small worked example is kept below as a commented illustration.
 """
 
 import argparse
@@ -83,19 +82,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     # TODO: add task-specific arguments for your study here.
     # ----------------------------------------------------------------------- #
     #
-    # Example (operator-overloading arithmetic study):
+    # Example (a single-digit addition task, e.g. prompts like "7+5="):
     #
-    #     parser.add_argument("--operator", "-o", type=str, required=True,
-    #                         help="The operator to use in the equation.")
-    #     parser.add_argument("--overloading-operator", "-oo", type=str, required=False,
-    #                         help="The overloading operator to use in the equation.")
-    #     parser.add_argument("--few-shot-examples", "-fs", type=int, required=True,
-    #                         help="Number of few-shot examples per prompt.")
+    #     parser.add_argument("--few-shot-examples", "-fs", type=int, default=4,
+    #                         help="Number of solved examples to show before the question.")
     #     parser.add_argument("--max-digits", "-md", type=int, default=1,
     #                         help="Maximum number of digits per operand.")
-    #     parser.add_argument("--reverse", "-rv", action="store_true",
-    #                         help="Use reverse-digit answer format (LSD-first).")
-    #     parser.add_argument("--pad-zero", action="store_true",
-    #                         help="Pad operands with leading zeros up to --max-digits.")
+    #
+    # You would then forward these from src/main.py into PromptDataset.generate_prompts.
     #
     # ----------------------------------------------------------------------- #

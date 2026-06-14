@@ -4,8 +4,8 @@ A "prompt" is just the input string you feed the model. The model reads it, gene
 continuation, and we capture its internal activations while it does so. So your prompts ARE
 your experiment: they decide what behaviour you get to study. This file is where you define them.
 
-You implement `PromptDataset.generate_prompts`. The operator-overloading arithmetic study this
-template was derived from is shown as a commented example.
+You implement `PromptDataset.generate_prompts`. A small self-contained example (single-digit
+addition) is shown in comments to illustrate the shape of the method.
 """
 
 

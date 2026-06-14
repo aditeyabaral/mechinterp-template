@@ -104,25 +104,24 @@ if __name__ == "__main__":
     # 8b. Intervention mode: re-run the prompts many times, each with one component knocked out,
     #     to measure which components causally matter. Results are saved alongside the baseline.
     else:
-        # TODO: this parses the --intervention spec format from the original study, where
-        # analysis.json lists, per layer, the important features found via Lasso ("std"/"over"),
-        # split into MLP neurons vs attention heads by the "num_mlp_neurons" boundary. Each feature
-        # is then ablated individually (a sweep). Adapt this block to read YOUR spec format and to
-        # build the {layer_idx: [indices]} ablation dicts you want to pass to inference.run.
+        # The spec is the analysis.json written by src/lasso.py: per layer, per condition, the
+        # list of "important" feature indices. Feature indices below num_mlp_neurons are MLP
+        # neurons; the rest are attention heads (offset by num_mlp). We ablate each important
+        # feature individually (a sweep) and record which conditions flagged it.
+        # TODO: if you write your own spec format, adapt this block to build the
+        # {layer_idx: [indices]} ablation dicts passed to inference.run.
         with open(args.intervention) as f:
             analysis = json.load(f)
 
-        # Feature indices below num_mlp are MLP neurons; the rest are attention heads (offset by num_mlp).
         num_mlp = analysis["num_mlp_neurons"]
         ablations: list[dict] = []
 
         layers_iter = tqdm(list(analysis["layers"].items()), desc="Layers", position=0)
         for layer_str, layer_data in layers_iter:
             layer_idx = int(layer_str)
-            lasso = layer_data.get("lasso", {})
-            std_features = set(lasso.get("std", []))
-            over_features = set(lasso.get("over", []))
-            all_features = sorted(std_features | over_features)
+            conditions = layer_data.get("conditions", {})
+            # The features to test are those flagged important by ANY condition (their union).
+            all_features = sorted({f for cond in conditions.values() for f in cond.get("important", [])})
 
             for feat_idx in tqdm(all_features, desc=f"Layer {layer_idx} features", position=1, leave=False):
                 if feat_idx < num_mlp:
@@ -149,8 +148,10 @@ if __name__ == "__main__":
                         "feature_idx": feat_idx,
                         "type": feat_type,
                         "local_idx": local_idx,
-                        "in_std": feat_idx in std_features,
-                        "in_over": feat_idx in over_features,
+                        # which conditions flagged this feature as important
+                        "conditions": [
+                            name for name, cond in conditions.items() if feat_idx in set(cond.get("important", []))
+                        ],
                         "result": ablated,
                     }
                 )

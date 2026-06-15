@@ -1,7 +1,8 @@
-"""Generate a synthetic dataset for training a small LM from scratch, and push it to the HF Hub.
+"""Generate a synthetic training dataset and save it (locally by default, or push to the HF Hub).
 
-This is a task-agnostic skeleton: it parses CLI arguments and pushes a DatasetDict
-to the Hub. You implement `build_dataset()` to produce the actual data for your task.
+This is a task-agnostic skeleton: it parses CLI arguments and saves a DatasetDict (locally by
+default, or pushes it to the Hub with --hub-name). You implement `build_dataset()` to produce
+the actual data for your task.
 
 `build_dataset` must return a `datasets.DatasetDict` with "train" and "validation"
 splits. Each row must contain at least a "prompt" and an "answer" column; add any
@@ -15,7 +16,7 @@ A leakage-safe recipe to follow inside `build_dataset` (strongly recommended):
      few-shot examples from the TRAIN pool only -- so a val question is never seen
      during training in any form, while val prompts still demonstrate the pattern.
 
-A self-contained worked example (single-digit addition, 8-shot) is given in the
+A self-contained worked example (single-digit addition, 4-shot) is given in the
 commented `build_dataset` body below; delete it and write your own.
 """
 
@@ -41,14 +42,16 @@ def build_dataset(train_size: int, val_size: int, seed: int, val_holdout: float)
     # TODO: implement dataset generation for your task.
     # ----------------------------------------------------------------------- #
     #
-    # Example (single-digit addition, 8-shot, leakage-safe):
+    # Example (single-digit addition, 4-shot, leakage-safe -- matches the commented examples
+    # in src/train/train_tokenizer.py and src/utils/dataset.py):
     #
     #     import numpy as np
     #     from datasets import Dataset
     #
-    #     FEW_SHOT = 8
+    #     few_shot = 4
     #
-    #     # 1. Enumerate every item, then split into disjoint train/val pools.
+    #     # 1. Enumerate every (a, b) item, then split into disjoint train/val pools so a
+    #     #    validation question never appears as a training question.
     #     items = [(a, b) for a in range(10) for b in range(10)]
     #     rng = np.random.default_rng(seed)
     #     rng.shuffle(items)
@@ -56,17 +59,17 @@ def build_dataset(train_size: int, val_size: int, seed: int, val_holdout: float)
     #     pools = {"train": items[:split_idx], "val": items[split_idx:]}
     #
     #     def render(a: int, b: int) -> str:
-    #         return f"{a}+{b}={a + b}"
+    #         return f"{a}+{b}={a + b}"  # one solved example, e.g. "7+5=12"
     #
-    #     # 2. Generate one split: questions from `q_pool`, few-shot from train pool.
+    #     # 2. Build one split: the question comes from `q_pool`, few-shot always from train.
     #     def generate_split(total: int, q_pool: list, split_name: str, split_seed: int) -> dict:
     #         srng = np.random.default_rng(split_seed)
     #         fs_pool = pools["train"]
     #         rows = []
     #         for i in range(total):
     #             a, b = q_pool[srng.integers(len(q_pool))]
-    #             fs = [render(*fs_pool[j]) for j in srng.integers(len(fs_pool), size=FEW_SHOT)]
-    #             prompt = "\n".join(fs) + f"\n{a}+{b}="
+    #             fs = [render(*fs_pool[j]) for j in srng.integers(len(fs_pool), size=few_shot)]
+    #             prompt = "\n".join(fs) + f"\n{a}+{b}="  # ends at "=", the model produces the sum
     #             rows.append(
     #                 {"_id": f"{split_name}-{i}", "question": f"{a}+{b}", "answer": str(a + b), "prompt": prompt}
     #             )
@@ -84,12 +87,19 @@ def build_dataset(train_size: int, val_size: int, seed: int, val_holdout: float)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate a synthetic HF dataset and push it to the Hub")
+    parser = argparse.ArgumentParser(description="Generate a synthetic dataset and save it locally or to the Hub")
     parser.add_argument(
         "--hub-name",
         type=str,
-        required=True,
-        help="HF Hub dataset repo to push to (e.g. your-username/your-dataset-name)",
+        default=None,
+        help="HF Hub dataset repo to push to (e.g. your-username/your-dataset-name). "
+        "If omitted, the dataset is saved locally to --output-dir instead (no login needed).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./artifacts/dataset",
+        help="Local directory to save the dataset to when --hub-name is not given.",
     )
     parser.add_argument("--train-size", type=int, default=1_000_000, help="Number of training rows")
     parser.add_argument("--val-size", type=int, default=100_000, help="Number of validation rows")
@@ -113,5 +123,9 @@ if __name__ == "__main__":
         val_holdout=args.val_holdout,
     )
 
-    dataset.push_to_hub(args.hub_name, max_shard_size=args.shard_size)
-    print(f"\nPushed dataset to hub: {args.hub_name}")
+    if args.hub_name:
+        dataset.push_to_hub(args.hub_name, max_shard_size=args.shard_size)
+        print(f"\nPushed dataset to hub: {args.hub_name}")
+    else:
+        dataset.save_to_disk(args.output_dir)
+        print(f"\nSaved dataset to {args.output_dir}  (pass --hub-name to push to the Hub instead)")

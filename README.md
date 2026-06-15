@@ -3,6 +3,7 @@
 A starting point for **mechanistic interpretability** ("mechinterp") projects on small transformer
 models. The intended workflow is:
 
+> [!NOTE]
 > **Pick a task → train a tiny ("toy") transformer on it from scratch → find which of its internal
 > components causally drive the behaviour**, by recording its activations and switching pieces off.
 
@@ -10,7 +11,8 @@ Because you design the task and train the model yourself, you know *exactly* wha
 explaining — and a tiny model is small enough to actually understand. That control is what makes toy
 models such a good interpretability playground.
 
-> **What this template does — and doesn't — do.** It identifies the **causal components**: it tells
+> [!IMPORTANT]
+> **What this template does and doesn't do.** It identifies the **causal components**: it tells
 > you *which* neurons and attention heads matter for your task, and *how much* (by measuring what
 > breaks when you switch them off). It does **not** explain *how* a given component does its job.
 > Turning "this head is important" into "this head does *X*" is task-specific, creative work with no
@@ -25,8 +27,6 @@ train, just by changing `--model-path`.
 
 This README assumes you've seen the transformer architecture once (you roughly know what "attention"
 and "layers" are) but are **new to interpretability**. It defines every concept you need.
-
----
 
 ## Contents
 
@@ -43,8 +43,7 @@ and "layers" are) but are **new to interpretability**. It defines every concept 
 - [Shortcut: analysing a pretrained model](#shortcut-analysing-a-pretrained-model)
 - [Using a non-GPT-2 model](#using-a-non-gpt-2-model)
 - [Further reading](#further-reading)
-
----
+- [Acknowledgements](#acknowledgements)
 
 ## The big picture
 
@@ -68,8 +67,6 @@ neuron is part of the mechanism. The template takes you exactly this far — a r
 that demonstrably matter, and by how much. Working out *what each one actually computes*, and how they
 combine into a "circuit," is the open-ended, task-specific part you do from there (there's no
 push-button method for it — that's the interesting research).
-
----
 
 ## Concepts you'll need (a short primer)
 
@@ -151,8 +148,6 @@ Everything in this template is one of two operations on those components:
   answer changes. This is the causal test that turns a correlation ("this neuron is active when…")
   into evidence ("the model *needs* this neuron to…").
 
----
-
 ## The pipeline at a glance
 
 Steps 1–3 build your toy model; steps 4–7 study it. Each name is a script you run, and each arrow is
@@ -160,23 +155,21 @@ what it produces and hands to the next one:
 
 ```
   train_tokenizer.py  ──▶  create_dataset.py  ──▶  train_model.py  ──▶  your toy model
-   (build a tokenizer)      (make training data)    (train it)          (saved to the Hub)
+   (build a tokenizer)      (make training data)    (train it)          (saved locally, or to the Hub)
                                                                                 │
                                                                                 ▼
   PromptDataset  ──▶  main.py  ──▶  results file  ──▶  lasso.py  ──▶  analysis.json
    (probe prompts)    (capture)     (activations)       (rank parts)    (what to ablate)
         │                                                                     │
-        └──────────────────▶  main.py --intervention  ◀─────────────────────┘
-                              (switch the parts off, measure the effect)
+        └──────────▶  main.py --intervention  ──▶  effects.py  ◀─────────────┘
+                      (switch the parts off)        (rank components by effect)
 ```
 
 Follow it like a snake: build the model along the top, drop down and run it on your own prompts to
-**record what happens inside**, **shortlist** the neurons/heads that look important, then feed that
-shortlist back into `main.py` to **switch them off and measure the effect**. The last two steps
-(`lasso.py` and `--intervention`) are optional — you can also stop after capturing and explore the
-saved activations yourself.
-
----
+**record what happens inside**, **shortlist** the neurons/heads that look important, feed that
+shortlist back into `main.py` to **switch them off**, then run `effects.py` to **rank them by how
+much each one mattered**. The last three steps (`lasso.py`, `--intervention`, `effects.py`) are
+optional — you can also stop after capturing and explore the saved activations yourself.
 
 ## Setup
 
@@ -189,13 +182,12 @@ uv run python src/main.py -h  # check it works (prints the command-line options)
 
 (You can also call the environment directly, e.g. `.venv/bin/python src/main.py -h`.)
 
-Training pushes your tokenizer/dataset/model to the Hugging Face Hub, so log in once:
+Training saves your tokenizer/dataset/model locally by default — no account needed. If you'd
+rather push them to the Hugging Face Hub (pass `--hub-name`), log in once:
 
 ```bash
 uv run huggingface-cli login
 ```
-
----
 
 ## Project structure
 
@@ -204,7 +196,7 @@ src/
   train/                 # build your toy model
     train_tokenizer.py   #   build a character-level tokenizer            [fill in vocab]
     create_dataset.py    #   generate a synthetic training dataset        [fill in build_dataset]
-    train_model.py       #   train a small GPT-2 and push it to the Hub   [fill in repo names]
+    train_model.py       #   train a small GPT-2, saved locally by default [fill in repo names]
   model.py               # load_model(): boots the model into a TransformerLens bridge (generic)
   utils/
     dataset.py           # PromptDataset: the probe prompts you run            [fill in — required]
@@ -214,14 +206,20 @@ src/
   inference.py           # the activation-capture loop — the heart of the analysis
   main.py                # ENTRY POINT: run capture (+ optional intervention) and save results
   lasso.py               # OPTIONAL: rank neurons/heads by importance, write analysis.json
+  effects.py             # OPTIONAL: rank ablated components by how much they changed the answers
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
 captured) and **`main.py`** (how a run is orchestrated). They are heavily commented.
 
----
-
 ## The workflow, step by step
+
+> [!NOTE]
+> **Local by default.** `--hub-name` is optional for `train_tokenizer.py`, `create_dataset.py`, and
+> `train_model.py` — omit it and the output is saved locally (`./artifacts/tokenizer`,
+> `./artifacts/dataset`, `--output-dir` for the model, default `./saved_models`) with no Hugging
+> Face login needed. Pass `--hub-name <user>/...` to push to the Hub instead, and point `--model-path`
+> (step 5) at whichever location you used.
 
 ### 1. Build a tokenizer
 
@@ -252,11 +250,13 @@ control the size with flags like `--num-hidden-layers`, `--num-attention-heads`,
 uv run python src/train/train_model.py --hub-name <user>/my-model --num-epochs 5
 ```
 
+> [!NOTE]
 > **A note on grokking.** Training defaults to a strong weight decay (`--weight-decay 1.0`). Heavy
 > weight decay is a well-known trigger for **grokking** — memorise first, generalise suddenly later.
 > Watching a circuit form during grokking is a classic experiment, so it's on by default. Train for
 > plenty of steps to give it a chance to appear, or lower `--weight-decay` to turn it down.
 
+> [!TIP]
 > **Smaller is better for interpretability.** A model with a couple of layers and a handful of heads
 > is *far* easier to fully understand than full GPT-2. Start as small as the task allows.
 
@@ -265,7 +265,8 @@ uv run python src/train/train_model.py --hub-name <user>/my-model --num-epochs 5
 Open `src/utils/dataset.py` and implement `PromptDataset.generate_prompts`. A prompt is just the
 input string you feed the model; end it right where you want the answer to begin (e.g. `"7+5="`).
 These prompts *are* your experiment — they decide what behaviour you get to study. **This is the one
-thing you must implement to run the analysis.**
+thing you must implement to run the analysis.** A self-contained example (single-digit addition) is
+included in comments — uncomment it to see the pipeline run end to end, then replace it.
 
 ### 5. Capture activations
 
@@ -295,16 +296,29 @@ uv run python src/lasso.py --dir . --output analysis.json
 Reads the `.pt` files, fits the Lasso, and writes `analysis.json` — the shortlist of important
 neurons/heads per layer.
 
-### 7. Ablate them and measure the effect *(optional)*
+### 7. Ablate them *(optional)*
 
 ```bash
 uv run python src/main.py -m <user>/my-model --num-prompts 200 --intervention analysis.json
 ```
 
 Re-runs the prompts, switching off each important component in turn, and saves the baseline plus one
-result per ablation — so you can see how much each component mattered to the model's answer.
+result per ablation into a single `.pt` file.
 
----
+### 8. Measure the effect *(optional)*
+
+```bash
+uv run python src/effects.py --file <the --intervention output>.pt        # ranked table
+uv run python src/effects.py --file <...>.pt --plot effects.png           # + a bar chart
+```
+
+Reads that file and prints a table of components — both MLP neurons and attention heads —
+**ranked by how much switching each one off changed the model's answers** (the payoff of the whole
+exercise). It reports `answer_change_rate` (fraction of prompts whose answer changed; works with no
+extra setup) and, once you implement `is_correct` in `src/effects.py`, an `accuracy_drop` column
+(how much each component mattered to *getting the task right*). Pass `--plot` to also save a bar
+chart (neurons and heads in different colours). The components at the top are the ones the model
+causally depends on — the starting point for working out what each actually computes.
 
 ## The capture convention (which token we read)
 
@@ -317,6 +331,7 @@ committed to its answer, so that position's residual stream is the most informat
 look. All four recorded tensors (residual, MLP neurons, attention heads, embedding) are read at this
 *same* position, so they always describe the same token.
 
+> [!NOTE]
 > How this works under the hood: after generating, we run the *whole* output sequence (prompt +
 > generation) back through the model in a single pass and read its activation cache. Because that one
 > pass covers every position, the answer's last token always has its activations computed — there's no
@@ -324,8 +339,6 @@ look. All four recorded tensors (residual, MLP neurons, attention heads, embeddi
 
 Which substring counts as "the answer" is decided by `find_answer_span` in `src/inference.py`. The
 default grabs the first whitespace-delimited chunk of the generation; override it for your task.
-
----
 
 ## What gets saved (and how to look at it)
 
@@ -373,14 +386,17 @@ neurons = answer["mlp_neurons"][layer]                      # MLP neurons at the
 print(neurons.shape)                                        # e.g. torch.Size([3072]) for GPT-2
 ```
 
+An **intervention** run (step 7) saves a slightly different layout — `{"baseline": [rows],
+"ablations": [{"layer_idx", "type", "local_idx", ..., "result": [rows]}, ...], "metadata": {...}}` —
+where each ablation's `result` is a full re-run with one component switched off. You normally don't
+read this by hand; `effects.py` (step 8) turns it into the ranked effect table for you.
+
 Result files get large. `src/utils/strip_geometry.py` writes a lightweight copy with the big tensors
 removed (keeping prompts, answers, metadata):
 
 ```bash
 uv run python src/utils/strip_geometry.py --dir <folder-of-.pt-files>
 ```
-
----
 
 ## Everything you need to fill in
 
@@ -401,12 +417,11 @@ grep -rn TODO src/
 | `src/utils/parser.py` | extra task-specific command-line arguments | optional |
 | `src/utils/dir.py` | `generate_output_path` — the output filename | optional (good default) |
 | `src/lasso.py` | `assign_condition`, `build_target` — what to compare/predict | optional (good defaults) |
+| `src/effects.py` | `is_correct` — whether a generated answer is right (unlocks `accuracy_drop`) | optional (default: skipped) |
 
 Each `TODO` explains *what* to do, *why*, and shows a worked example in comments. Once your model is
 trained, the analysis side **runs as soon as you implement `PromptDataset.generate_prompts`** — every
 other extension point has a working default.
-
----
 
 ## Tips and common pitfalls
 
@@ -419,8 +434,6 @@ other extension point has a working default.
 - **Reproducibility is built in:** `main.py` seeds all RNGs from `--seed`, so reruns are identical.
 - **GPU vs CPU:** the model is placed automatically; everything also runs on CPU, just slower.
 
----
-
 ## Shortcut: analysing a pretrained model
 
 You don't *have* to train your own model. To skip steps 1–3 and study an existing GPT-2-style
@@ -430,10 +443,8 @@ checkpoint instead, point `--model-path` at any HF repo id or local path:
 uv run python src/main.py -m gpt2 --num-prompts 200 --capture-geometry
 ```
 
-The rest of the analysis (steps 4–7) is identical. (Training your own model is recommended for
+The rest of the analysis (steps 4–8) is identical. (Training your own model is recommended for
 learning, because you control and understand the task completely.)
-
----
 
 ## Using a non-GPT-2 model
 
@@ -446,8 +457,6 @@ reference only those names, so switching models is just a matter of pointing `--
 different Hub repo or local directory — the bridge reads the new model's config and `cfg.n_layers /
 n_heads / d_head` update automatically.
 
----
-
 ## Further reading
 
 To go deeper into the ideas this template puts into practice:
@@ -458,3 +467,28 @@ To go deeper into the ideas this template puts into practice:
   Interpretability"** — a friendly on-ramp to the field.
 - **Progress measures for grokking via mechanistic interpretability** (Nanda et al., 2023) — a worked
   example of reverse-engineering a grokked toy model (very close in spirit to this template).
+- **Toy Models of Superposition** (Elhage et al., 2022) — why a single neuron doesn't always
+  correspond to a single human-readable feature, and what to expect when one of your "important"
+  neurons doesn't have a clean story.
+- **Locating and Editing Factual Associations in GPT** (Meng et al., 2022, "ROME") — causal tracing
+  and targeted ablation/editing applied to a real model, the same style of evidence this template
+  produces at toy-model scale.
+- **ARENA: Mechanistic Interpretability curriculum** (Callum McDougall et al.) — a hands-on,
+  exercise-based course built on TransformerLens; a natural next step once you're comfortable with
+  this template's workflow.
+
+## Acknowledgements
+
+This template is built entirely on top of the open-source mechanistic interpretability and
+machine-learning ecosystem:
+
+- **[TransformerLens](https://github.com/TransformerLensOrg/TransformerLens)** (originally by Neel
+  Nanda, now maintained by the TransformerLens community) provides the hook-based interface this
+  template uses for all activation capture and ablation.
+- **Hugging Face's `transformers`, `datasets`, `tokenizers`, and `accelerate`** libraries provide the
+  tokenizer, dataset, and training infrastructure in `src/train/`.
+- **GPT-2** (Radford et al., 2019, OpenAI) is the architecture every toy model in this template is
+  based on.
+- The overall workflow — train a toy model on a task you understand, then use causal interventions to
+  find the circuit behind it — follows the approach popularised by the mechanistic interpretability
+  research community (see [Further reading](#further-reading)).

@@ -16,7 +16,6 @@ dependencies = [
     "torch>=2.6.0,<2.10",
     "transformers>=4.57.1",
     "wandb>=0.25.0",
-    "pytest>=9.0.2",
     "rich>=14.3.3",
     "transformer-lens>=3.2.1",
 ]
@@ -49,7 +48,6 @@ convention = "google"
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-exclude = ["test_*.py"]
 
 [tool.ruff.format]
 quote-style = "double"

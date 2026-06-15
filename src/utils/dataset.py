@@ -5,7 +5,8 @@ continuation, and we capture its internal activations while it does so. So your 
 your experiment: they decide what behaviour you get to study. This file is where you define them.
 
 You implement `PromptDataset.generate_prompts`. A small self-contained example (single-digit
-addition) is shown in comments to illustrate the shape of the method.
+addition) is shown in comments -- uncomment it to see the pipeline run, then replace it with
+prompts for your own task.
 """
 
 
@@ -56,7 +57,7 @@ class PromptDataset:
         #     then pass them through from src/main.py.
         # ----------------------------------------------------------------------------------- #
         #
-        # Example (single-digit addition, 4-shot):
+        # Example (single-digit addition, 4-shot) -- uncomment to run the pipeline, then replace:
         #
         #     import random
         #     instance = cls()

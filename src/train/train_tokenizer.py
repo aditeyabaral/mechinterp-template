@@ -1,4 +1,4 @@
-"""Build and push a character-level tokenizer to the HF Hub.
+"""Build a character-level tokenizer and save it (locally by default, or push to the HF Hub).
 
 This builds a deterministic, training-free WordLevel tokenizer that maps each
 character in `VOCAB_CHARS` to its own token. This pattern is useful for small
@@ -9,7 +9,8 @@ TODO (you must implement this for your task):
   2. `SAMPLE_TEXTS` -- a few representative strings for the round-trip sanity
      checks at the bottom of this script.
 
-The HF Hub repo to push to is passed via --hub-name on the command line.
+By default the tokenizer is saved locally to --output-dir; pass --hub-name to push it to
+the HF Hub instead.
 
 See the commented-out example below for a small self-contained illustration
 (a single-digit arithmetic task).
@@ -38,13 +39,14 @@ from transformers import PreTrainedTokenizerFast
 # --------------------------------------------------------------------------- #
 #
 # Example (a single-digit addition task with prompts like "7+5="):
-# VOCAB_CHARS = sorted("0123456789+=\n")
-# SAMPLE_TEXTS = [
-#     "2+3=5\n",
-#     "7+5=12\n",
-#     "1+1=2\n4+0=4\n2+6=8\n6+4=10\n5+6=11\n8+1=9\n9+8=17\n3+3=",
-# ]
-
+#
+#     VOCAB_CHARS = sorted("0123456789+=\n")
+#     SAMPLE_TEXTS = [
+#         "2+3=5\n",
+#         "7+5=12\n",
+#         "1+1=2\n4+0=4\n2+6=8\n6+4=10\n5+6=11\n8+1=9\n9+8=17\n3+3=",
+#     ]
+#
 VOCAB_CHARS: list[str] = []
 SAMPLE_TEXTS: list[str] = []
 
@@ -78,12 +80,19 @@ def build_tokenizer() -> PreTrainedTokenizerFast:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build and push a character-level tokenizer to the HF Hub")
+    parser = argparse.ArgumentParser(description="Build a character-level tokenizer and save it locally or to the Hub")
     parser.add_argument(
         "--hub-name",
         type=str,
-        required=True,
-        help="HF Hub repo to push the tokenizer to (e.g. your-username/your-project-tokenizer)",
+        default=None,
+        help="HF Hub repo to push the tokenizer to (e.g. your-username/your-project-tokenizer). "
+        "If omitted, the tokenizer is saved locally to --output-dir instead (no login needed).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./artifacts/tokenizer",
+        help="Local directory to save the tokenizer to when --hub-name is not given.",
     )
     args = parser.parse_args()
 
@@ -140,5 +149,9 @@ if __name__ == "__main__":
 
     print("\nAll tokenization assertions passed.")
 
-    tokenizer.push_to_hub(args.hub_name)
-    print(f"\nPushed to hub: {args.hub_name}")
+    if args.hub_name:
+        tokenizer.push_to_hub(args.hub_name)
+        print(f"\nPushed tokenizer to hub: {args.hub_name}")
+    else:
+        tokenizer.save_pretrained(args.output_dir)
+        print(f"\nSaved tokenizer to {args.output_dir}  (pass --hub-name to push to the Hub instead)")

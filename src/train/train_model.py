@@ -1,11 +1,12 @@
-"""Train a small LM from scratch on a synthetic dataset, then push it to the HF Hub.
+"""Train a small LM from scratch on a synthetic dataset (locally by default, or push to the HF Hub).
 
 Uses a GPT-2 architecture; only the size parameters (n_embd, n_layer, n_head, ...)
 are configurable, so you get a tiny randomly-initialised model.
 
-Loads a pre-built tokenizer from the HF Hub (see train_tokenizer.py) and trains on
-a dataset with "prompt" and "answer" columns (see create_dataset.py), then pushes
-the trained model to the HF Hub.
+Loads a pre-built tokenizer (see train_tokenizer.py; TOKENIZER_NAME below can be a
+local path such as "./artifacts/tokenizer" or an HF Hub repo ID) and trains on a
+dataset with "prompt" and "answer" columns (see create_dataset.py; DATASET_NAME can
+likewise be a local path such as "./artifacts/dataset" or an HF Hub repo ID).
 
 Evaluation is done by greedy generation + exact-match accuracy on the "answer"
 column. If your task needs finer-grained metrics (per-category accuracy, etc.),
@@ -37,7 +38,8 @@ from transformers import (
 # Example: TOKENIZER_NAME = "your-username/your-project-tokenizer"
 TOKENIZER_NAME: str = ""
 
-# HF Hub dataset repo with train/validation splits (see create_dataset.py).
+# Dataset with "train"/"validation" splits (see create_dataset.py). A local path such as
+# "./artifacts/dataset" or an HF Hub repo ID both work.
 # Example: DATASET_NAME = "your-username/your-dataset-name"
 DATASET_NAME: str = ""
 
@@ -156,8 +158,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--hub-name",
         type=str,
-        required=True,
-        help="HF Hub repo to push the model to",
+        default=None,
+        help="HF Hub repo to push the trained model to. If omitted, the model is only saved "
+        "locally to --output-dir (no Hugging Face login needed).",
     )
     parser.add_argument(
         "--output-dir", type=str, default="./saved_models", help="Output directory for model checkpoints"
@@ -190,8 +193,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--report-to",
         type=str,
-        default="wandb",
-        help="Reporting integration (e.g. 'wandb', 'tensorboard', 'none')",
+        default="none",
+        help="Reporting integration (e.g. 'wandb', 'tensorboard', 'none'). Defaults to 'none' so "
+        "training works without a wandb account; pass --report-to wandb to enable it.",
     )
     parser.add_argument("--run-name", type=str, default=None, help="Run name for the experiment tracker")
 
@@ -296,17 +300,20 @@ if __name__ == "__main__":
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        # Reloading the best checkpoint may print "missing keys: ['lm_head.weight']" -- this is
+        # expected and harmless: GPT-2 ties its output head to the input embedding, so that
+        # weight is shared rather than saved twice.
         load_best_model_at_end=True,
         metric_for_best_model="eval_accuracy",
         greater_is_better=True,
         logging_strategy="steps",
         logging_steps=args.logging_steps,
-        push_to_hub=True,
+        push_to_hub=hub_name is not None,
         hub_model_id=hub_name,
         hub_strategy="every_save",
         seed=args.seed,
         report_to=args.report_to,
-        run_name=args.run_name if args.run_name is not None else hub_name.split("/")[-1],
+        run_name=args.run_name if args.run_name is not None else (hub_name.split("/")[-1] if hub_name else None),
         bf16=supports_bf16,
     )
 
@@ -324,8 +331,13 @@ if __name__ == "__main__":
     print("\nStarting training...")
     trainer.train()
 
-    print(f"\nPushing model and tokenizer to {hub_name}...")
-    trainer.push_to_hub()
+    if hub_name:
+        print(f"\nPushing model and tokenizer to {hub_name}...")
+        trainer.push_to_hub()
+    else:
+        trainer.save_model(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        print(f"\nModel and tokenizer saved to {args.output_dir}  (pass --hub-name to push to the Hub instead)")
 
     # Post-training evaluation
     print("\nRunning post-training evaluation on validation split...")

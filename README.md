@@ -309,8 +309,10 @@ the current directory (its name is generated automatically from the run's parame
 uv run python src/lasso.py --dir . --output analysis.json
 ```
 
-Reads the `.pt` files, fits the Lasso, and writes `analysis.json` — the shortlist of important
-neurons/heads per layer.
+Reads the `.pt` files, fits the Lasso, and writes `analysis.json` — per layer and per condition, the
+shortlist of important neurons/heads, each with its Lasso **weight** (signed effect size), plus a
+top-level `conditions` block recording how many rows backed each condition. (See the `lasso.py`
+module docstring for the exact JSON layout.)
 
 ### 7. Ablate them *(optional)*
 

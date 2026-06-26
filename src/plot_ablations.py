@@ -1,23 +1,34 @@
 """Plot the causal effect of zeroing each ablated neuron/head, from an intervention .pt file.
 
-OPTIONAL, and a starting point rather than a finished tool. It turns `src/main.py --intervention`
-output into a heatmap of how much knocking out each flagged component changed task accuracy.
+OPTIONAL, and a STARTING POINT rather than a finished tool: it ships one ready-to-run figure plus
+three reusable helpers you build your own figures on top of. Run it as:
 
-  heatmap_<name>.png: layers (rows) x within-layer component index (cols), cell = accuracy_drop
+    python src/plot_ablations.py --file <intervention .pt> --num-mlp-neurons <d_mlp>
+
+  heatmap_ablations.png: layers (rows) x within-layer component index (cols), cell = accuracy_drop
     (baseline_accuracy - ablated_accuracy). Columns 0..num_mlp-1 are MLP neurons; the rest are
     attention heads. Components that weren't ablated are left blank (grey).
 
-REQUIREMENT (read this first): each ablation entry must carry an `accuracy_drop`, which intervention
-mode records via `is_correct` in src/main.py. That default scores a row correct when the model's
-answer (row["result"]["answer"]["token"]) equals an "answer" stored in that prompt's metadata, so
-the drops are only meaningful if your prompts carry a ground-truth "answer" (see
-PromptDataset.generate_prompts in src/utils/dataset.py) and `is_correct` matches your task. Without
-that, every drop is 0 and the heatmap is blank. See the `load_ablations` docstring for the exact
-fields expected.
+WHAT YOU NEED FIRST (read this before running): each ablation entry must carry an `accuracy_drop`,
+which intervention mode records via `is_correct` in src/main.py. That default scores a row correct
+when the model's answer (row["result"]["answer"]["token"]) equals an "answer" stored in that
+prompt's metadata, so the drops are only meaningful if your prompts carry a ground-truth "answer"
+(see PromptDataset.generate_prompts in src/utils/dataset.py) AND `is_correct` matches your task.
+Without that, every drop is 0 and the heatmap is blank. See the `load_ablations` docstring for the
+exact fields expected.
 
-The reusable, task-agnostic pieces here are `load_ablations`, `neuron_label`, and `_save_heatmap`;
-build whatever figure your experiment needs on top of them (e.g. a scatter comparing two conditions
-you define).
+WHAT YOU CAN CHANGE / HOW TO EXTEND:
+  - The three task-agnostic helpers are the reusable core; they know nothing about your task:
+      load_ablations(pt_path)  -- read an intervention file's per-component summary (drops the heavy
+                                  per-prompt rows so only the small {layer, feature, drop, ...} list
+                                  stays in memory).
+      neuron_label(...)        -- a readable component tag, e.g. "L0MLP1" / "L2A2".
+      _save_heatmap(matrix, …) -- render ANY [rows x cols] matrix as a 0-centered diverging heatmap.
+  - `make_heatmap` is the one figure built on those helpers. Copy it as a template for your own
+    matrix-shaped views (e.g. average the drop across several files, or restrict to attention heads).
+  - A common next figure is a SCATTER comparing two runs/conditions (which components matter in
+    setting A vs setting B). A worked, commented `make_scatter` example sits just above `__main__`
+    below -- uncomment it, then call it from `__main__` with two intervention files.
 """
 
 import argparse
@@ -179,6 +190,34 @@ def _save_heatmap(
     fig.savefig(out, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved {out}")
+
+
+# ----------------------------------------------------------------------------------- #
+# EXAMPLE -- extend with your own figure. A scatter comparing two intervention runs (e.g.
+# two conditions, or two models): each point is one component, x = its accuracy_drop in run
+# A, y = in run B. A component flagged in only one run is 0-filled on the other axis, so it
+# lands on an axis; the y=x line marks components equally important to both. Uncomment, then
+# call it from `__main__` below with two .pt files.
+#
+#     def make_scatter(file_a: Path, file_b: Path, out: Path) -> None:
+#         """Scatter of per-component accuracy_drop in run A (x) vs run B (y)."""
+#         # Key each component by (layer, feature) so the same component lines up across runs.
+#         a = {(r["layer_idx"], r["feature_idx"]): r for r in (load_ablations(file_a) or [])}
+#         b = {(r["layer_idx"], r["feature_idx"]): r for r in (load_ablations(file_b) or [])}
+#         fig, ax = plt.subplots(figsize=(8, 8))
+#         for key in sorted(set(a) | set(b)):
+#             info = a.get(key) or b.get(key)                   # label info from whichever run has it
+#             x = a[key]["accuracy_drop"] if key in a else 0.0  # 0-fill: not flagged in run A
+#             y = b[key]["accuracy_drop"] if key in b else 0.0  # 0-fill: not flagged in run B
+#             ax.scatter(x, y, s=28, alpha=0.7)
+#             ax.annotate(neuron_label(info["layer_idx"], info["type"], info["local_idx"]), (x, y), fontsize=5)
+#         ax.axline((0, 0), slope=1, linestyle="--", color="grey")  # y = x: equally important to both
+#         ax.set_xlabel("accuracy drop (run A)")
+#         ax.set_ylabel("accuracy drop (run B)")
+#         fig.savefig(out, dpi=150, bbox_inches="tight")
+#         plt.close(fig)
+#         print(f"  saved {out}")
+# ----------------------------------------------------------------------------------- #
 
 
 if __name__ == "__main__":

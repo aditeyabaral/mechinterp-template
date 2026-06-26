@@ -14,7 +14,8 @@ Pipeline:
   4. Fit an L1-regularised Lasso to predict a scalar target (build_target). L1 drives most
      coefficients to exactly zero, so the features with non-zero coefficients are the small set
      the model actually relies on -- the "important" neurons/heads for that condition.
-  5. Save analysis.json: per layer, per condition, the list of important feature indices.
+  5. Save analysis.json: per layer, per condition, the important feature indices and their Lasso
+     coefficients (weights), plus a top-level "conditions" block recording each condition's row count.
 
 Two task-specific placeholders (search this file for TODO):
   - assign_condition(row, metadata): which condition a result belongs to (default: "all").
@@ -22,6 +23,23 @@ Two task-specific placeholders (search this file for TODO):
 
 Feature index convention (shared with main.py's intervention mode): indices 0..num_mlp-1 are MLP
 neurons; indices num_mlp..num_mlp+num_heads-1 are attention heads.
+
+Output format (analysis.json), consumed by `main.py --intervention`:
+    {
+      "num_mlp_neurons": int, "num_heads": int,
+      "conditions": {                          # one entry per condition (from assign_condition)
+        "<condition>": {"n_rows": int}         # how many rows backed this condition's fits
+      },
+      "layers": {
+        "<layer_idx>": {                       # only layers/conditions with enough rows appear
+          "<condition>": {"features": [int, ...], "weight": [float, ...]}
+        }
+      }
+    }
+Each "features" entry is a feature index (see the convention above); the matching "weight" is its
+signed Lasso coefficient (effect size + direction of correlation with the target). At each layer,
+main.py ablates the UNION of every condition's features. If you change this format, update the
+reader in main.py's intervention block to match.
 """
 
 import argparse
@@ -194,8 +212,8 @@ def build_condition_matrices(
     return matrices
 
 
-def run_lasso(x: np.ndarray, y: np.ndarray, min_samples: int = 10) -> list[int] | None:
-    """Fit a cross-validated Lasso and return the indices of the important (non-zero) features.
+def run_lasso(x: np.ndarray, y: np.ndarray, min_samples: int = 10) -> dict[str, list] | None:
+    """Fit a cross-validated Lasso and return the important (non-zero-coefficient) features.
 
     Both X and y are standardised first so coefficients are comparable and the L1 penalty
     treats every feature on the same scale.
@@ -206,14 +224,18 @@ def run_lasso(x: np.ndarray, y: np.ndarray, min_samples: int = 10) -> list[int] 
         min_samples: Skip (return None) if there are fewer than this many rows.
 
     Returns:
-        Sorted list of feature indices with a non-zero coefficient, or None if skipped.
+        {"features": [indices], "weight": [coefficients]} (same order, index ascending) for the
+        features with a non-zero coefficient, or None if skipped. The signed coefficient is the
+        feature's standardised effect size, so it carries the direction of correlation with the
+        target too, not just whether the feature matters.
     """
     if x.shape[0] < min_samples:
         return None
     x_scaled = StandardScaler().fit_transform(x)
     y_scaled = (y - y.mean()) / (y.std() + 1e-8)
     lasso = LassoCV(cv=5, max_iter=100000, random_state=42, n_jobs=-1).fit(x_scaled, y_scaled)
-    return [int(i) for i in np.where(np.abs(lasso.coef_) > 0)[0]]
+    important = np.where(np.abs(lasso.coef_) > 0)[0]
+    return {"features": [int(i) for i in important], "weight": [float(lasso.coef_[i]) for i in important]}
 
 
 def main() -> None:
@@ -245,20 +267,30 @@ def main() -> None:
         if num_mlp:
             break
 
-    # analysis.json: per layer, per condition, the important feature indices (consumed by main.py).
-    analysis: dict[str, Any] = {"num_mlp_neurons": num_mlp, "num_heads": num_heads, "layers": {}}
+    # analysis.json (consumed by main.py): per layer, per condition, the important features and
+    # their Lasso coefficients. A top-level "conditions" block records how many rows backed each
+    # condition, so a short feature list can be told apart from "too little data to fit reliably".
+    analysis: dict[str, Any] = {
+        "num_mlp_neurons": num_mlp,
+        "num_heads": num_heads,
+        "conditions": {
+            condition: {"n_rows": max((d["X"].shape[0] for d in by_layer.values()), default=0)}
+            for condition, by_layer in matrices.items()
+        },
+        "layers": {},
+    }
     for layer_idx in layer_indices:
-        conditions_out: dict[str, Any] = {}
+        layer_out: dict[str, Any] = {}
         for condition, by_layer in matrices.items():
             d = by_layer.get(layer_idx)
             if d is None:
                 continue
-            important = run_lasso(d["X"], d["y"])
-            if important is None:
+            flagged = run_lasso(d["X"], d["y"])
+            if flagged is None:
                 continue
-            conditions_out[condition] = {"important": important}
-            print(f"  layer {layer_idx} | condition '{condition}': {len(important)} important features")
-        analysis["layers"][str(layer_idx)] = {"conditions": conditions_out}
+            layer_out[condition] = flagged  # {"features": [...], "weight": [...]}
+            print(f"  layer {layer_idx} | condition '{condition}': {len(flagged['features'])} important features")
+        analysis["layers"][str(layer_idx)] = layer_out
 
     with open(args.output, "w") as f:
         json.dump(analysis, f, indent=2)

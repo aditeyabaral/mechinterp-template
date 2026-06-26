@@ -116,9 +116,9 @@ if __name__ == "__main__":
     # 8b. Intervention mode: re-run the prompts many times, each with one component knocked out,
     #     to measure which components causally matter. Results are saved alongside the baseline.
     else:
-        # The spec is the analysis.json written by src/lasso.py: per layer, per condition, the
-        # list of "important" feature indices. Feature indices below num_mlp_neurons are MLP
-        # neurons; the rest are attention heads (offset by num_mlp). We ablate each important
+        # The spec is the analysis.json written by src/lasso.py: analysis["layers"][L][condition]
+        # is {"features": [indices], "weight": [coeffs]}. Feature indices below num_mlp_neurons are
+        # MLP neurons; the rest are attention heads (offset by num_mlp). We ablate each flagged
         # feature individually (a sweep) and record which conditions flagged it.
         # TODO: if you write your own spec format, adapt this block to build the
         # {layer_idx: [indices]} ablation dicts passed to inference.run.
@@ -133,11 +133,10 @@ if __name__ == "__main__":
         baseline_accuracy = sum(1 for row in result if is_correct(row)) / len(result) if result else 0.0
 
         layers_iter = tqdm(list(analysis["layers"].items()), desc="Layers", position=0)
-        for layer_str, layer_data in layers_iter:
+        for layer_str, layer_conditions in layers_iter:
             layer_idx = int(layer_str)
-            conditions = layer_data.get("conditions", {})
-            # The features to test are those flagged important by ANY condition (their union).
-            all_features = sorted({f for cond in conditions.values() for f in cond.get("important", [])})
+            # The features to test are those flagged by ANY condition at this layer (their union).
+            all_features = sorted({f for entry in layer_conditions.values() for f in entry["features"]})
 
             for feat_idx in tqdm(all_features, desc=f"Layer {layer_idx} features", position=1, leave=False):
                 if feat_idx < num_mlp:
@@ -170,7 +169,7 @@ if __name__ == "__main__":
                         "local_idx": local_idx,
                         # which conditions flagged this feature as important
                         "conditions": [
-                            name for name, cond in conditions.items() if feat_idx in set(cond.get("important", []))
+                            name for name, entry in layer_conditions.items() if feat_idx in set(entry["features"])
                         ],
                         "accuracy": ablated_accuracy,
                         "accuracy_drop": baseline_accuracy - ablated_accuracy,

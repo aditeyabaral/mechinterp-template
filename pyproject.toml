@@ -45,6 +45,12 @@ select = [
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.ruff.lint.isort]
+# wandb is a third-party dependency, but a gitignored local `wandb/` run-log directory
+# makes ruff auto-detect it as first-party locally (while CI, lacking that dir, treats it
+# as third-party) -- causing I001 to pass locally but fail on CI.
+known-third-party = ["wandb"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"

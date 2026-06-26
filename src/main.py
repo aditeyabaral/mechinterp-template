@@ -16,7 +16,6 @@ The extension points, in the order you'll likely touch them:
   4. src/utils/parser.py   add_arguments                   -- add any task-specific CLI arguments.
   5. src/utils/dir.py      generate_output_path            -- name your saved output files.
   6. "Intervention mode" below                             -- the format of your --intervention spec file.
-  7. src/effects.py        is_correct                      -- score the intervention effect on task accuracy.
 
 To train a small model from scratch first, see src/train/ (tokenizer -> dataset -> model),
 which has its own TODO markers.

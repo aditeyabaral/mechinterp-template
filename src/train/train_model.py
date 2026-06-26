@@ -1,7 +1,8 @@
 """Train a small LM from scratch on a synthetic dataset (locally by default, or push to the HF Hub).
 
-Uses a GPT-2 architecture; only the size parameters (n_embd, n_layer, n_head, ...)
-are configurable, so you get a tiny randomly-initialised model.
+Uses a GPT-2 architecture; the size parameters (n_embd, n_layer, n_head, n_positions) are
+configurable via CLI args, so you get a tiny randomly-initialised model. The MLP inner size
+(n_inner) is always 4x hidden size (standard GPT-2 convention).
 
 Loads a pre-built tokenizer (see train_tokenizer.py; TOKENIZER_NAME below can be a
 local path such as "./artifacts/tokenizer" or an HF Hub repo ID) and trains on a
@@ -145,11 +146,11 @@ class GenerationEvalTrainer(Trainer):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a small LM from scratch on a synthetic dataset")
 
-    # Model size (GPT-2 config attribute names)
+    # Model size (GPT-2 config attribute names). The MLP/FFN inner size (n_inner) is not an
+    # independent knob -- it's always 4x hidden size, the standard GPT-2 convention.
     parser.add_argument("--hidden-size", type=int, default=256, help="Hidden size (GPT-2 n_embd)")
     parser.add_argument("--num-hidden-layers", type=int, default=4, help="Number of transformer layers (GPT-2 n_layer)")
     parser.add_argument("--num-attention-heads", type=int, default=4, help="Number of attention heads (GPT-2 n_head)")
-    parser.add_argument("--intermediate-size", type=int, default=1024, help="MLP/FFN inner size (GPT-2 n_inner)")
     parser.add_argument(
         "--max-position-embeddings", type=int, default=256, help="Max sequence length (GPT-2 n_positions)"
     )
@@ -232,13 +233,21 @@ if __name__ == "__main__":
     config = GPT2Config(
         vocab_size=len(tokenizer),  # must match the tokenizer so the embedding/output sizes line up
         n_embd=args.hidden_size,  # width of the residual stream (hidden_size)
-        n_inner=args.intermediate_size,  # width of each MLP's hidden layer
+        n_inner=4 * args.hidden_size,  # width of each MLP's hidden layer -- standard GPT-2 4x ratio
         n_layer=args.num_hidden_layers,  # number of transformer blocks (depth)
         n_head=args.num_attention_heads,  # attention heads per block
         n_positions=args.max_position_embeddings,  # max sequence length the model can handle
         pad_token_id=tokenizer.pad_token_id,
         bos_token_id=tokenizer.bos_token_id,
         eos_token_id=tokenizer.eos_token_id,
+        # Disable dropout (GPT2Config defaults all of these to 0.1). For a tiny model trained from
+        # scratch on a synthetic task, weight decay is usually a better sole regularizer; dropout
+        # mostly adds noise that hurts these small setups. Remove these lines if you
+        # want the standard GPT-2 dropout back.
+        resid_pdrop=0.0,
+        embd_pdrop=0.0,
+        attn_pdrop=0.0,
+        summary_first_dropout=0.0,
     )
 
     # from_config builds the model with RANDOM weights (training "from scratch"), as opposed to

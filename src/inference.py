@@ -16,6 +16,8 @@ HOW CAPTURE AND ABLATION WORK HERE (the TransformerLens idea):
             blocks.{l}.mlp.hook_post     MLP intermediate "neurons"      [batch, pos, d_mlp]
             blocks.{l}.attn.hook_z       per-head attention output       [batch, pos, n_heads, d_head]
             hook_embed                   token embedding (pre-block 0)   [batch, pos, d_model]
+            hook_pos_embed               positional embedding (pre-block 0) [batch, pos, d_model]
+            blocks.0.hook_resid_pre      token_embed + pos_embed (block 0's input) [batch, pos, d_model]
       - model.run_with_hooks(tokens, fwd_hooks=[(name, fn), ...]): runs the model while calling
         each fn on the named activation, letting fn EDIT it (we set entries to 0 to ablate).
 
@@ -239,6 +241,49 @@ def build_ablation_hooks(
     return hooks
 
 
+def _read_activations_at(
+    cache: dict[str, torch.Tensor],
+    layer_indices: list[int],
+    pos: int | None,
+) -> dict[str, Any]:
+    """Read MLP-neuron, per-head, residual, and embedding activations at ONE token position.
+
+    Shared by `_capture_geometry` (one call per named prompt position) and `_run_single_prompt`
+    (one call for the answer position), so the cache-indexing logic lives in exactly one place.
+
+    Args:
+        cache: The activation cache from model.run_with_cache over the full output sequence.
+        layer_indices: Layer indices to read per-layer activations from.
+        pos: The absolute token position to read, or None (or out of range) to get all-None
+            placeholders -- e.g. when the answer couldn't be located, or a prompt position
+            couldn't be parsed.
+
+    Returns:
+        {"mlp_neurons": {layer_idx: Tensor | None}, "attn_heads": {layer_idx: Tensor | None},
+         "residual": {layer_idx: Tensor | None}, "token_embedding": Tensor | None,
+         "pos_embedding": Tensor | None, "resid_pre": Tensor | None}. "resid_pre" is block 0's
+         actual input (blocks.0.hook_resid_pre, i.e. token_embedding + pos_embedding), read
+         directly from the cache rather than summed so it stays correct for any architecture.
+    """
+    embed = cache["hook_embed"][0]  # [seq_len, d_model]
+    in_range = pos is not None and 0 <= pos < embed.shape[0]
+
+    return {
+        "mlp_neurons": {
+            i: cache[f"blocks.{i}.mlp.hook_post"][0, pos].detach().cpu() if in_range else None for i in layer_indices
+        },
+        "attn_heads": {
+            i: cache[f"blocks.{i}.attn.hook_z"][0, pos].detach().cpu() if in_range else None for i in layer_indices
+        },
+        "residual": {
+            i: cache[f"blocks.{i}.hook_resid_post"][0, pos].detach().cpu() if in_range else None for i in layer_indices
+        },
+        "token_embedding": embed[pos].detach().cpu() if in_range else None,
+        "pos_embedding": cache["hook_pos_embed"][0, pos].detach().cpu() if in_range else None,
+        "resid_pre": cache["blocks.0.hook_resid_pre"][0, pos].detach().cpu() if in_range else None,
+    }
+
+
 def _capture_geometry(
     cache: dict[str, torch.Tensor],
     layer_indices: list[int],
@@ -255,29 +300,32 @@ def _capture_geometry(
     Returns:
         dict mapping each position name to layer_idx ->
         {"residual": Tensor | None, "mlp": Tensor | None, "heads": Tensor | None}.
-        layer_idx=-1 holds the pre-transformer token embedding (residual only, mlp/heads=None).
+        layer_idx=-1 holds the pre-block-0 representation: "resid_pre" is block 0's actual input
+        (blocks.0.hook_resid_pre = token_embedding + pos_embedding), "mlp"/"heads"=None (nothing
+        runs before block 0), plus the decomposed "token_embedding" and "pos_embedding" so you can
+        separate content from position.
     """
-    geometry: dict[str, dict] = {name: {} for name in positions}
-    embed = cache["hook_embed"][0]  # [seq_len, d_model]
-
+    geometry: dict[str, dict] = {}
     for name, pos in positions.items():
-        # layer_idx = -1 holds the token embedding (the pre-block representation).
-        in_embed = pos is not None and 0 <= pos < embed.shape[0]
-        geometry[name][-1] = {
-            "residual": embed[pos].detach().cpu() if in_embed else None,
-            "mlp": None,
-            "heads": None,
+        act = _read_activations_at(cache, layer_indices, pos)
+        geometry[name] = {
+            # layer_idx = -1 holds the pre-block-0 representation.
+            -1: {
+                "resid_pre": act["resid_pre"],
+                "mlp": None,
+                "heads": None,
+                "token_embedding": act["token_embedding"],
+                "pos_embedding": act["pos_embedding"],
+            },
+            **{
+                layer_idx: {
+                    "residual": act["residual"][layer_idx],
+                    "mlp": act["mlp_neurons"][layer_idx],
+                    "heads": act["attn_heads"][layer_idx],
+                }
+                for layer_idx in layer_indices
+            },
         }
-        for layer_idx in layer_indices:
-            resid = cache[f"blocks.{layer_idx}.hook_resid_post"][0]  # [seq_len, d_model]
-            mlp = cache[f"blocks.{layer_idx}.mlp.hook_post"][0]  # [seq_len, d_mlp]
-            heads = cache[f"blocks.{layer_idx}.attn.hook_z"][0]  # [seq_len, n_heads, d_head]
-            in_range = pos is not None and 0 <= pos < resid.shape[0]
-            geometry[name][layer_idx] = {
-                "residual": resid[pos].detach().cpu() if in_range else None,
-                "mlp": mlp[pos].detach().cpu() if in_range else None,
-                "heads": heads[pos].detach().cpu() if in_range else None,  # [n_heads, d_head]
-            }
 
     return geometry
 
@@ -310,12 +358,14 @@ def _run_single_prompt(
         mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero out.
         head_ablation: Optional dict {layer_idx: [head indices]} to zero out.
         capture_geometry: If True, read per-position activations (MLP neurons, heads, residual,
-            embedding) and store output_ids. Set False during ablation sweeps to store less data.
+            token/positional embedding) and store output_ids. Set False during ablation sweeps to
+            store less data.
 
     Returns:
         Dict with keys: text, completion, output_ids (None when capture_geometry=False), and an
-        answer sub-dict (position, token_id, token, mlp_neurons, attn_heads, residual, embedding,
-        logits) plus a geometry sub-dict (empty when capture_geometry=False).
+        answer sub-dict (position, token_id, token, mlp_neurons, attn_heads, residual,
+        token_embedding, pos_embedding, resid_pre, logits) plus a geometry sub-dict (empty when
+        capture_geometry=False).
     """
     ablation_hooks = build_ablation_hooks(mlp_ablation, head_ablation)
     prompt_tokens = model.to_tokens(prompt, prepend_bos=False)  # [1, prompt_length]
@@ -351,14 +401,19 @@ def _run_single_prompt(
         model, prompt_length, output_ids, logits
     )
 
-    # 4. Read all activations at the answer token's position (same position across every tensor,
-    #    so they all describe the same token).
-    if capture_geometry and cache is not None and answer_position is not None:
-        pos = answer_position
-        mlp_neurons = {i: cache[f"blocks.{i}.mlp.hook_post"][0, pos].detach().cpu() for i in layer_indices}
-        attn_heads = {i: cache[f"blocks.{i}.attn.hook_z"][0, pos].detach().cpu() for i in layer_indices}
-        answer_residual = {i: cache[f"blocks.{i}.hook_resid_post"][0, pos].detach().cpu() for i in layer_indices}
-        answer_embedding = cache["hook_embed"][0, pos].detach().cpu()
+    # 4. Read all activations at the answer token's position (same position across every tensor, so
+    #    they all describe the same token), plus the prompt-position geometry. These are independent:
+    #    geometry covers PROMPT positions known from the prompt text alone, so it's captured even
+    #    when the answer couldn't be located (e.g. garbage generation); only the answer-position
+    #    activations need answer_position (a None pos yields all-None placeholders).
+    if capture_geometry and cache is not None:
+        answer_act = _read_activations_at(cache, layer_indices, answer_position)
+        mlp_neurons = answer_act["mlp_neurons"]
+        attn_heads = answer_act["attn_heads"]
+        answer_residual = answer_act["residual"]
+        answer_token_embedding = answer_act["token_embedding"]
+        answer_pos_embedding = answer_act["pos_embedding"]
+        answer_resid_pre = answer_act["resid_pre"]
 
         positions = find_positions_of_interest(model, prompt)
         geometry = _capture_geometry(cache, layer_indices, positions)
@@ -366,7 +421,9 @@ def _run_single_prompt(
         mlp_neurons = {i: None for i in layer_indices}
         attn_heads = {i: None for i in layer_indices}
         answer_residual = {i: None for i in layer_indices}
-        answer_embedding = None
+        answer_token_embedding = None
+        answer_pos_embedding = None
+        answer_resid_pre = None
         geometry = {}
 
     return {
@@ -380,7 +437,9 @@ def _run_single_prompt(
             "mlp_neurons": mlp_neurons,
             "attn_heads": attn_heads,
             "residual": answer_residual,
-            "embedding": answer_embedding,
+            "token_embedding": answer_token_embedding,
+            "pos_embedding": answer_pos_embedding,
+            "resid_pre": answer_resid_pre,
             "logits": answer_logits if answer_logits is not None else None,
         },
         "geometry": geometry,
@@ -400,7 +459,8 @@ def run(
 
     Args:
         model: The TransformerLens bridge.
-        dataset: Dataset whose `.prompts` is a list of prompt strings to run.
+        dataset: Dataset whose `.prompts` is a list of {"prompt": str, "metadata": dict} entries
+            to run (see src/utils/dataset.py).
         layers: Layer indices to capture from.
         max_new_tokens: Max tokens to generate per prompt.
         mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero on every prompt.
@@ -410,10 +470,13 @@ def run(
             storing per-feature geometry data.
 
     Returns:
-        List of result dicts, one per prompt (see _run_single_prompt for the per-prompt schema).
+        List of result dicts, one per prompt (in dataset order), each with keys "prompt",
+        "prompt_length", "metadata" (that prompt's ground truth -- see src/utils/dataset.py), and
+        "result" (see _run_single_prompt for that sub-dict's schema).
     """
     results: list[dict[str, Any]] = []
-    for prompt_idx, prompt in enumerate(tqdm(dataset.prompts, desc="Running neuron inference")):
+    for entry in tqdm(dataset.prompts, desc="Running neuron inference"):
+        prompt = entry["prompt"]
         # prompt_length (in tokens, no BOS) marks the boundary between prompt and generated tokens.
         prompt_length = model.to_tokens(prompt, prepend_bos=False).shape[1]
 
@@ -430,9 +493,9 @@ def run(
 
         results.append(
             {
-                "prompt_idx": prompt_idx,
                 "prompt": prompt,
                 "prompt_length": prompt_length,
+                "metadata": entry.get("metadata", {}),
                 "result": run_result,
             }
         )

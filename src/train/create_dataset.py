@@ -58,20 +58,23 @@ def build_dataset(train_size: int, val_size: int, seed: int, val_holdout: float)
     #     split_idx = int(len(items) * (1 - val_holdout))
     #     pools = {"train": items[:split_idx], "val": items[split_idx:]}
     #
-    #     def render(a: int, b: int) -> str:
-    #         return f"{a}+{b}={a + b}"  # one solved example, e.g. "7+5=12"
-    #
-    #     # 2. Build one split: the question comes from `q_pool`, few-shot always from train.
+    #     # 2. Build one split: the question comes from `q_pool`, few-shot ALWAYS from train. Each
+    #     #    shot looks like "7+5=12" and the prompt ends at "=", exactly the shape produced by
+    #     #    src/utils/dataset.py's example -- the same prompts you'll later run inference on. The
+    #     #    a/b/answer columns mirror the ground-truth dict that example stores under "metadata".
     #     def generate_split(total: int, q_pool: list, split_name: str, split_seed: int) -> dict:
     #         srng = np.random.default_rng(split_seed)
     #         fs_pool = pools["train"]
     #         rows = []
     #         for i in range(total):
+    #             shots = []                                     # the solved examples shown first
+    #             for j in srng.integers(len(fs_pool), size=few_shot):
+    #                 fa, fb = fs_pool[j]
+    #                 shots.append(f"{fa}+{fb}={fa + fb}")       # e.g. "7+5=12"
     #             a, b = q_pool[srng.integers(len(q_pool))]
-    #             fs = [render(*fs_pool[j]) for j in srng.integers(len(fs_pool), size=few_shot)]
-    #             prompt = "\n".join(fs) + f"\n{a}+{b}="  # ends at "=", the model produces the sum
+    #             prompt = "\n".join(shots) + f"\n{a}+{b}="      # ends at "=", answer to come
     #             rows.append(
-    #                 {"_id": f"{split_name}-{i}", "question": f"{a}+{b}", "answer": str(a + b), "prompt": prompt}
+    #                 {"_id": f"{split_name}-{i}", "a": a, "b": b, "answer": str(a + b), "prompt": prompt}
     #             )
     #         return {k: [r[k] for r in rows] for k in rows[0]}
     #

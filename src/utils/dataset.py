@@ -11,16 +11,19 @@ prompts for your own task.
 
 
 class PromptDataset:
-    """A collection of prompt strings to run activation-extraction inference on.
+    """A collection of prompts to run activation-extraction inference on.
 
-    `inference.run` iterates over `self.prompts` (a plain list of strings); that is the only
-    interface the rest of the pipeline relies on, so a prompt is whatever string you want the
-    model to process.
+    `inference.run` iterates over `self.prompts`, a list of {"prompt": str, "metadata": dict}
+    entries; that is the only interface the rest of the pipeline relies on. "prompt" is the string
+    fed to the model; "metadata" is an optional free-form dict that can carry that prompt's ground truth
+    (e.g. the operands and correct answer) so you can score the model's output downstream. It's
+    passed straight through to each result row and never inspected by the pipeline, so put whatever
+    you need in it (or leave it empty).
     """
 
     def __init__(self) -> None:
         """Initialize an empty dataset."""
-        self.prompts: list[str] = []
+        self.prompts: list[dict] = []
 
     def __len__(self) -> int:
         """Return the number of prompts in the dataset."""
@@ -34,15 +37,23 @@ class PromptDataset:
             num_prompts: How many prompts to generate (comes from `--num-prompts`).
 
         Returns:
-            A PromptDataset whose `.prompts` is a list of `num_prompts` strings.
+            A PromptDataset whose `.prompts` is a list of `num_prompts` {"prompt": str,
+            "metadata": dict} entries.
         """
         # ----------------------------------------------------------------------------------- #
-        # TODO: build your prompts and append each one (a string) to `instance.prompts`.
+        # TODO: build your prompts and append each one to `instance.prompts` as a dict
+        #     {"prompt": <string>, "metadata": <dict of ground truth>}.
         #
         # WHAT a prompt should be:
         #   The model continues whatever you give it, so end the prompt right where you want the
         #   answer to begin. For arithmetic you'd end with "7+5=" so the model produces "12".
         #   Whatever the model then generates is parsed by find_answer_span in src/inference.py.
+        #
+        # WHAT metadata is for:
+        #   A free-form dict of that prompt's ground truth (e.g. {"a": 7, "b": 5, "answer": "12"}).
+        #   It's copied verbatim onto the result row, so downstream code (scoring, lasso.py) can
+        #   compare the model's output against the truth. The pipeline never reads it -- use {} if
+        #   you don't need it.
         #
         # FEW-SHOT prompting (used in the example below):
         #   Small models follow patterns better when you first show a few solved examples
@@ -67,7 +78,12 @@ class PromptDataset:
         #             a, b = random.randint(0, 9), random.randint(0, 9)
         #             shots.append(f"{a}+{b}={a + b}")          # e.g. "7+5=12"
         #         a, b = random.randint(0, 9), random.randint(0, 9)
-        #         instance.prompts.append("\n".join(shots) + f"\n{a}+{b}=")  # ends at "=", answer to come
+        #         instance.prompts.append(
+        #             {
+        #                 "prompt": "\n".join(shots) + f"\n{a}+{b}=",  # ends at "=", answer to come
+        #                 "metadata": {"a": a, "b": b, "answer": str(a + b)},
+        #             }
+        #         )
         #     return instance
         #
         # ----------------------------------------------------------------------------------- #

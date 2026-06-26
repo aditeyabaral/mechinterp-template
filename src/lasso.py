@@ -42,7 +42,7 @@ def assign_condition(row: dict[str, Any], metadata: dict[str, Any]) -> str | Non
     several distinct labels across your rows lets you compare conditions (A vs B vs ...).
 
     Args:
-        row: One per-prompt result dict (from the saved "result" list).
+        row: One per-prompt result dict (from the saved "baseline" list).
         metadata: The file's metadata dict.
 
     Returns:
@@ -129,12 +129,12 @@ def _load_rows(results_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]
     pt_files = sorted(results_dir.glob("*.pt"))
     for pt_file in pt_files:
         data = torch.load(pt_file, map_location="cpu", weights_only=False)
-        # main.py normal mode saves {"result": [...], "metadata": {...}}.
-        if "result" not in data:
+        # main.py saves the unablated run under "baseline" (both normal and intervention mode).
+        if "baseline" not in data:
             continue
         if not metadata:
             metadata = data.get("metadata", {})
-        rows.extend(data["result"])
+        rows.extend(data["baseline"])
     return rows, metadata
 
 

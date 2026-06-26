@@ -222,6 +222,7 @@ src/
   inference.py           # the activation-capture loop — the heart of the analysis
   main.py                # ENTRY POINT: run capture (+ optional intervention) and save results
   lasso.py               # OPTIONAL: rank neurons/heads by importance, write analysis.json
+  plot_ablations.py      # OPTIONAL: heatmap of each ablated component's accuracy drop
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
@@ -317,9 +318,15 @@ neurons/heads per layer.
 uv run python src/main.py -m <user>/my-model --num-prompts 200 --intervention analysis.json
 ```
 
-Re-runs the prompts, switching off each important component in turn, and saves the baseline plus one
-result per ablation into a single `.pt` file. Compare each ablation's answers against the baseline to
-see how much that component mattered (see "What gets saved" below for the file's layout).
+Re-runs the prompts, switching off each important component in turn, and for each one records the
+**accuracy drop** it causes (`baseline_accuracy - ablated_accuracy`) into a single `.pt` file — the
+bigger the drop, the more the model relied on that component. Accuracy is scored by `is_correct` in
+`src/main.py` (it compares the model's answer to the `"answer"` in each prompt's metadata; adjust it
+for your task). `src/plot_ablations.py` turns those drops into a heatmap:
+
+```bash
+uv run python src/plot_ablations.py --file <the --intervention output>.pt --num-mlp-neurons <d_mlp>
+```
 
 ## The capture convention (which token we read)
 
@@ -349,7 +356,7 @@ CPU). The shapes shown are GPT-2's; a toy model you trained will have whatever s
 
 ```python
 {
-  "result": [                       # one entry per prompt
+  "baseline": [                     # one entry per prompt (intervention mode uses this key too)
     {
       "prompt": "7+5=",
       "prompt_length": 4,           # number of prompt tokens
@@ -381,7 +388,7 @@ To explore it in a notebook:
 ```python
 import torch
 data = torch.load("your_results.pt", weights_only=False)   # the .pt file main.py wrote
-row = data["result"][0]
+row = data["baseline"][0]
 print(row["prompt"], "->", row["result"]["answer"]["token"])
 answer = row["result"]["answer"]
 layer = data["metadata"]["layer_indices"][0]                # a layer you actually captured
@@ -390,9 +397,10 @@ print(neurons.shape)                                        # e.g. torch.Size([3
 ```
 
 An **intervention** run (step 7) saves a slightly different layout — `{"baseline": [rows],
-"ablations": [{"layer_idx", "type", "local_idx", ..., "result": [rows]}, ...], "metadata": {...}}` —
-where each ablation's `result` is a full re-run with one component switched off. Compare each
-ablation's answers against the `baseline` rows to see which components the model relied on.
+"baseline_accuracy": float, "ablations": [{"layer_idx", "feature_idx", "type", "local_idx",
+"accuracy", "accuracy_drop"}, ...], "metadata": {...}}` — where each ablation records only the
+*scalar* accuracy and its drop versus baseline (the heavy per-ablation rows are discarded; the
+unablated `baseline` is kept once). `src/plot_ablations.py` reads this and plots the drops.
 
 ## Everything you need to fill in
 
@@ -413,6 +421,7 @@ grep -rn TODO src/
 | `src/utils/parser.py` | extra task-specific command-line arguments | optional |
 | `src/utils/dir.py` | `generate_output_path` — the output filename | optional (good default) |
 | `src/lasso.py` | `assign_condition`, `build_target` — what to compare/predict | optional (good defaults) |
+| `src/main.py` | `is_correct` — whether a generated answer is right (scores ablation accuracy drops) | optional (good default) |
 
 Each `TODO` explains *what* to do, *why*, and shows a worked example in comments. Once your model is
 trained, the analysis side **runs as soon as you implement `PromptDataset.generate_prompts`** — every

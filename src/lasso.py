@@ -281,7 +281,7 @@ def run_lasso(x: np.ndarray, y: np.ndarray, min_samples: int = 10) -> dict[str, 
 
 
 if __name__ == "__main__":
-    """Load results, run the Lasso per condition per layer, and write analysis.json."""
+    # Load results, run the Lasso per condition per layer, and write analysis.json.
     parser = argparse.ArgumentParser(description="Find important neurons/heads via sparse (Lasso) regression.")
     parser.add_argument("--dir", "-d", type=str, required=True, help="Directory with .pt result files from main.py.")
     parser.add_argument("--output", "-o", type=str, default="analysis.json", help="Where to write the analysis JSON.")
@@ -313,7 +313,10 @@ if __name__ == "__main__":
 
     matrices = finalize_matrices(buckets)
     if not matrices:
-        raise SystemExit(f"No usable .pt result files found in {args.dir}")
+        raise SystemExit(
+            f"No usable rows found in {args.dir} -- the .pt files may lack a 'baseline' key, or every "
+            "row was dropped by keep_row / assign_condition / build_target (all returning None/False)."
+        )
     print(f"Conditions: {sorted(matrices)} | layers={layer_indices} | num_heads={num_heads}")
 
     # Figure out num_mlp from a feature vector (its length minus the head columns).

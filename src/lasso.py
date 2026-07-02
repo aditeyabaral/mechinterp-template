@@ -4,20 +4,25 @@ This is an OPTIONAL analysis step. It turns the activations captured by main.py 
 spec file (analysis.json) that `python src/main.py --intervention analysis.json` then uses
 to ablate the flagged neurons/heads and measure their causal effect.
 
-Pipeline:
+Pipeline (one .pt file at a time -- see main() -- so only one file's raw activations are ever
+resident in memory; each file is freed before the next is loaded, since activation files are large.
+Only the compact feature matrices, not the raw rows, accumulate across files):
   1. Load saved inference results (.pt files from main.py) -> one row per prompt, each carrying
      the MLP-neuron and attention-head activations captured at the answer token.
-  2. Group rows into CONDITIONS (assign_condition). A "condition" is any subset of rows you want
+  2. Optionally drop rows you don't want to learn from (keep_row) -- e.g. keep only the prompts the
+     model answered correctly.
+  3. Group the kept rows into CONDITIONS (assign_condition). A "condition" is any subset of rows you want
      to analyse separately so you can compare them -- e.g. A vs B vs C. (Default: one condition.)
-  3. For each condition and layer, build a feature matrix X of shape [N_rows, num_mlp + num_heads]:
+  4. For each condition and layer, build a feature matrix X of shape [N_rows, num_mlp + num_heads]:
      the MLP neuron activations concatenated with one L2 norm per attention head.
-  4. Fit an L1-regularised Lasso to predict a scalar target (build_target). L1 drives most
+  5. Fit an L1-regularised Lasso to predict a scalar target (build_target). L1 drives most
      coefficients to exactly zero, so the features with non-zero coefficients are the small set
      the model actually relies on -- the "important" neurons/heads for that condition.
-  5. Save analysis.json: per layer, per condition, the important feature indices and their Lasso
+  6. Save analysis.json: per layer, per condition, the important feature indices and their Lasso
      coefficients (weights), plus a top-level "conditions" block recording each condition's row count.
 
-Two task-specific placeholders (search this file for TODO):
+Three task-specific placeholders (search this file for TODO):
+  - keep_row(row, metadata):         whether to include a result at all (default: keep every row).
   - assign_condition(row, metadata): which condition a result belongs to (default: "all").
   - build_target(row, metadata):     the scalar the Lasso predicts (default: the answer token id).
 
@@ -51,6 +56,37 @@ import numpy as np
 import torch
 from sklearn.linear_model import LassoCV
 from sklearn.preprocessing import StandardScaler
+
+
+def keep_row(row: dict[str, Any], metadata: dict[str, Any]) -> bool:
+    """Return True to include this result row in the analysis, False to drop it.
+
+    Runs before assign_condition/build_target, so a dropped row never reaches the Lasso. The
+    default keeps every row (identical to having no filter); override it to exclude rows whose
+    activations would mislead the regression.
+
+    Args:
+        row: One per-prompt result dict (from the saved "baseline" list).
+        metadata: The file's metadata dict.
+
+    Returns:
+        True to keep the row, False to drop it.
+    """
+    # ----------------------------------------------------------------------------------- #
+    # TODO (optional): drop rows you don't want the Lasso to learn from. The most common filter:
+    # keep only the prompts the model answered CORRECTLY, since a wrong answer's activations at the
+    # answer token encode whatever (wrong) computation produced it, not the target behaviour --
+    # pairing your target with those activations would mislabel the regression data.
+    #
+    # main.py already defines this exact correctness check (its is_correct) -- import and call it so
+    # the two stay in sync, rather than duplicating the comparison here:
+    #     from main import is_correct
+    #     return is_correct(row)
+    # (is_correct assumes your prompts carry a ground-truth "answer" in their metadata -- see
+    # PromptDataset.generate_prompts in src/utils/dataset.py.)
+    # ----------------------------------------------------------------------------------- #
+    #
+    return True
 
 
 def assign_condition(row: dict[str, Any], metadata: dict[str, Any]) -> str | None:
@@ -132,28 +168,24 @@ def build_target(row: dict[str, Any], metadata: dict[str, Any]) -> float | None:
     return float(ids[-1].item())
 
 
-def _load_rows(results_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Load every .pt result file in a directory into one list of rows, plus the metadata.
+def _load_file(pt_file: Path) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    """Load one .pt result file, or None if it is not a main.py normal-mode result file.
+
+    Loaded one file at a time (see main()) so only one file's raw activations are resident at
+    once; the caller extracts the compact feature vectors it needs and frees this file's rows
+    before loading the next.
 
     Args:
-        results_dir: Directory containing .pt files saved by main.py (normal mode).
+        pt_file: A .pt file saved by main.py (normal mode).
 
     Returns:
-        (rows, metadata): all per-prompt result rows concatenated, and the metadata of the
-        first file (layer indices, num_attention_heads, ... are assumed consistent across files).
+        (rows, metadata), or None if the file has no "baseline" key (main.py saves the unablated
+        run under "baseline" in both normal and intervention mode).
     """
-    rows: list[dict[str, Any]] = []
-    metadata: dict[str, Any] = {}
-    pt_files = sorted(results_dir.glob("*.pt"))
-    for pt_file in pt_files:
-        data = torch.load(pt_file, map_location="cpu", weights_only=False)
-        # main.py saves the unablated run under "baseline" (both normal and intervention mode).
-        if "baseline" not in data:
-            continue
-        if not metadata:
-            metadata = data.get("metadata", {})
-        rows.extend(data["baseline"])
-    return rows, metadata
+    data = torch.load(pt_file, map_location="cpu", weights_only=False)
+    if "baseline" not in data:
+        return None
+    return data["baseline"], data.get("metadata", {})
 
 
 def _feature_vector(answer: dict[str, Any], layer_idx: int) -> np.ndarray | None:
@@ -172,19 +204,22 @@ def _feature_vector(answer: dict[str, Any], layer_idx: int) -> np.ndarray | None
     return np.concatenate([mlp.numpy(), head_norms.numpy()])
 
 
-def build_condition_matrices(
+def accumulate_features(
     rows: list[dict[str, Any]],
     metadata: dict[str, Any],
     layer_indices: list[int],
-) -> dict[str, dict[int, dict[str, np.ndarray]]]:
-    """Group rows by condition and build a per-layer (X, y) feature matrix for each.
+    buckets: dict[str, dict[int, dict[str, list]]],
+) -> None:
+    """Extract one file's kept rows into shared per-condition/per-layer feature buckets.
 
-    Returns condition_name -> layer_idx -> {"X": [N, num_mlp + num_heads], "y": [N]}.
+    Mutates `buckets` in place -- buckets[condition][layer] = {"X": [...], "y": [...]} (lists) --
+    so it can be called once per file to accumulate across files. Rows dropped by keep_row, or by
+    assign_condition/build_target returning None, are skipped. Only the compact feature vectors are
+    retained, so the caller can free this file's `rows` afterwards even though `buckets` lives on.
     """
-    # buckets[condition][layer] = {"X": [...], "y": [...]} (lists, converted to arrays at the end)
-    buckets: dict[str, dict[int, dict[str, list]]] = {}
-
     for row in rows:
+        if not keep_row(row, metadata):
+            continue
         condition = assign_condition(row, metadata)
         if condition is None:
             continue
@@ -200,7 +235,14 @@ def build_condition_matrices(
             layer_bucket["X"].append(feat)
             layer_bucket["y"].append(target)
 
-    # Convert the accumulated lists into numpy arrays.
+
+def finalize_matrices(
+    buckets: dict[str, dict[int, dict[str, list]]],
+) -> dict[str, dict[int, dict[str, np.ndarray]]]:
+    """Convert accumulated feature lists into numpy arrays, once every file has been processed.
+
+    Returns condition_name -> layer_idx -> {"X": [N, num_mlp + num_heads], "y": [N]}.
+    """
     matrices: dict[str, dict[int, dict[str, np.ndarray]]] = {}
     for condition, by_layer in buckets.items():
         matrices[condition] = {}
@@ -238,24 +280,41 @@ def run_lasso(x: np.ndarray, y: np.ndarray, min_samples: int = 10) -> dict[str, 
     return {"features": [int(i) for i in important], "weight": [float(lasso.coef_[i]) for i in important]}
 
 
-def main() -> None:
+if __name__ == "__main__":
     """Load results, run the Lasso per condition per layer, and write analysis.json."""
     parser = argparse.ArgumentParser(description="Find important neurons/heads via sparse (Lasso) regression.")
     parser.add_argument("--dir", "-d", type=str, required=True, help="Directory with .pt result files from main.py.")
     parser.add_argument("--output", "-o", type=str, default="analysis.json", help="Where to write the analysis JSON.")
     args = parser.parse_args()
 
-    rows, metadata = _load_rows(Path(args.dir))
-    if not rows:
+    pt_files = sorted(Path(args.dir).glob("*.pt"))
+    if not pt_files:
+        raise SystemExit(f"No .pt result files found in {args.dir}")
+
+    # Process one .pt file at a time: extract its compact feature vectors into shared buckets, then
+    # free the file's raw rows before loading the next -- so only one file's activations are ever
+    # resident, while the small feature matrices accumulate across files.
+    # buckets[condition][layer] = {"X": [...], "y": [...]}; layer/head counts come from the metadata
+    # main.py saved (assumed consistent across files, since they share the same model/--layers config).
+    buckets: dict[str, dict[int, dict[str, list]]] = {}
+    layer_indices: list[int] = []
+    num_heads = 0
+    for pt_file in pt_files:
+        loaded = _load_file(pt_file)
+        if loaded is None:
+            continue
+        rows, metadata = loaded
+        if not layer_indices:
+            layer_indices = metadata.get("layer_indices", [])
+            num_heads = metadata.get("num_attention_heads", 0)
+        accumulate_features(rows, metadata, layer_indices, buckets)
+        print(f"{pt_file.name}: {len(rows)} rows")
+        del rows, loaded  # free this file's raw activations before loading the next
+
+    matrices = finalize_matrices(buckets)
+    if not matrices:
         raise SystemExit(f"No usable .pt result files found in {args.dir}")
-
-    # layer indices and head count come from the metadata main.py saved.
-    layer_indices = metadata.get("layer_indices", [])
-    num_heads = metadata.get("num_attention_heads", 0)
-    print(f"Loaded {len(rows)} rows | layers={layer_indices} | num_heads={num_heads}")
-
-    matrices = build_condition_matrices(rows, metadata, layer_indices)
-    print(f"Conditions: {sorted(matrices)}")
+    print(f"Conditions: {sorted(matrices)} | layers={layer_indices} | num_heads={num_heads}")
 
     # Figure out num_mlp from a feature vector (its length minus the head columns).
     num_mlp = 0
@@ -296,7 +355,3 @@ def main() -> None:
         json.dump(analysis, f, indent=2)
     print(f"\nSaved analysis to {args.output}")
     print(f"Run interventions with:  python src/main.py -m <model> --intervention {args.output}")
-
-
-if __name__ == "__main__":
-    main()

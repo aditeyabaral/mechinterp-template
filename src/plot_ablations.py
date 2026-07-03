@@ -504,7 +504,7 @@ if __name__ == "__main__":
     if len(loaded) >= 2:
         all_layers = sorted(
             {layer for _, meta in loaded.values() for layer in (meta.get("layer_indices") or [])}
-            or {a["layer_idx"] for ablations in abl_by_setting.values() for a in ablations}
+            | {a["layer_idx"] for ablations in abl_by_setting.values() for a in ablations}
         )
         max_mlp = max((infer_num_mlp(ablations, meta) or 0) for ablations, meta in loaded.values())
         max_heads = max(meta.get("num_attention_heads", 0) for _, meta in loaded.values())

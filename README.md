@@ -180,6 +180,9 @@ what it produces and hands to the next one:
         │                                                                     │
         └──────────▶  main.py --intervention  ◀───────────────────────────────┘
                       (switch the parts off, save baseline + ablated runs)
+                              │
+                              ▼
+                      plot_ablations.py  (visualise the drops: heatmaps + scatter)
 ```
 
 Follow it like a snake: build the model along the top, drop down and run it on your own prompts to
@@ -222,7 +225,7 @@ src/
   inference.py           # the activation-capture loop — the heart of the analysis
   main.py                # ENTRY POINT: run capture (+ optional intervention) and save results
   lasso.py               # OPTIONAL: rank neurons/heads by importance, write analysis.json
-  plot_ablations.py      # OPTIONAL: heatmap of each ablated component's accuracy drop
+  plot_ablations.py      # OPTIONAL: heatmaps + cross-run scatter of ablation accuracy drops
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
@@ -324,11 +327,27 @@ Re-runs the prompts, switching off each important component in turn, and for eac
 **accuracy drop** it causes (`baseline_accuracy - ablated_accuracy`) into a single `.pt` file — the
 bigger the drop, the more the model relied on that component. Accuracy is scored by `is_correct` in
 `src/main.py` (it compares the model's answer to the `"answer"` in each prompt's metadata; adjust it
-for your task). `src/plot_ablations.py` turns those drops into a heatmap:
+for your task). `src/plot_ablations.py` turns those drops into figures. Like `lasso.py`, it reads a
+whole **directory** of intervention runs — each `.pt` in it is one *setting* — and reads the layer
+count, head count and MLP size from the files themselves, so there is nothing else to pass:
 
 ```bash
-uv run python src/plot_ablations.py --file <the --intervention output>.pt --num-mlp-neurons <d_mlp>
+uv run python src/plot_ablations.py --dir <dir with your intervention .pt files> --output plots
 ```
+
+Into `plots/` it writes:
+
+- **per-run heatmaps** — for each run, a `layer × MLP-neuron` and a `layer × attention-head` heatmap
+  of the accuracy drop (grey = a component that run didn't ablate);
+- **across-run comparisons** *(only when the directory has ≥2 runs)* — `setting × component` heatmaps
+  (read one neuron/head *down a column* to compare it across runs) and, for every pair of runs, a
+  **scatter** placing each component at (`its drop in run A`, `its drop in run B`): points on the
+  `y=x` line matter equally in both runs, points off it matter in one but not the other. A point's
+  shape marks its type (circle = neuron, star = head) and its colour marks its layer.
+
+So a single intervention file already gives you the two per-run heatmaps; to get the comparisons,
+capture-and-ablate under two conditions (say, two prompt distributions or two models) and drop both
+`.pt` files in the same directory.
 
 ## The capture convention (which token we read)
 
@@ -402,7 +421,8 @@ An **intervention** run (step 7) saves a slightly different layout — `{"baseli
 "baseline_accuracy": float, "ablations": [{"layer_idx", "feature_idx", "type", "local_idx",
 "accuracy", "accuracy_drop"}, ...], "metadata": {...}}` — where each ablation records only the
 *scalar* accuracy and its drop versus baseline (the heavy per-ablation rows are discarded; the
-unablated `baseline` is kept once). `src/plot_ablations.py` reads this and plots the drops.
+unablated `baseline` is kept once). `src/plot_ablations.py` reads these files and turns the drops
+into heatmaps and cross-run scatter plots (step 7).
 
 ## Everything you need to fill in
 

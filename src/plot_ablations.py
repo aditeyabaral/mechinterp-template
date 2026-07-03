@@ -1,37 +1,65 @@
-"""Plot the causal effect of zeroing each ablated neuron/head, from an intervention .pt file.
+"""Plot the causal effect of zeroing each ablated neuron/head, from intervention .pt files.
 
-OPTIONAL, and a STARTING POINT rather than a finished tool: it ships one ready-to-run figure plus
-three reusable helpers you build your own figures on top of. Run it as:
+Point it at a DIRECTORY of intervention runs (exactly like src/lasso.py takes --dir) 
+and it reads everything it needs from the files:
 
-    python src/plot_ablations.py --file <intervention .pt> --num-mlp-neurons <d_mlp>
+    python src/plot_ablations.py --dir <dir of intervention .pt files> [--output plots]
 
-  heatmap_ablations.png: layers (rows) x within-layer component index (cols), cell = accuracy_drop
-    (baseline_accuracy - ablated_accuracy). Columns 0..num_mlp-1 are MLP neurons; the rest are
-    attention heads. Components that weren't ablated are left blank (grey).
+Each .pt in the directory is one intervention run -- one `main.py --intervention` invocation.
+We call each run a SETTING. Every figure's cell/point value is accuracy_drop (baseline_accuracy -
+ablated_accuracy). Un-measured cells are grey. From the runs it draws:
+
+  HEATMAPS -- split by component type (MLP vs heads), with the layer axis in the shared per-layer
+  colours (the same shape/colour scheme as the scatter):
+    1. heatmap_<setting>_mlp.png    -- one per run: layers (rows) x MLP-neuron index (cols).
+    2. heatmap_<setting>_heads.png  -- one per run: layers (rows) x attention-head index (cols).
+    3. heatmap_settings_mlp.png     -- settings (rows) x flattened (layer, MLP neuron) (cols), width
+                                       n_layers * num_mlp; read a column down to compare one neuron
+                                       across runs. Layer blocks are divided and labelled L0, L1, ...
+    4. heatmap_settings_heads.png   -- settings (rows) x flattened (layer, attention head) (cols),
+                                       width n_layers * num_heads. (3 & 4 need >= 2 runs.)
+
+  SCATTER MATRIX, one per PAIR of runs -> scatter_<A>_vs_<B>.png: one point per component,
+  x = its accuracy_drop in run A, y = in run B (needs at least two runs). Each point's SHAPE is its
+  type (circle = MLP neuron, star = attention head) and its COLOUR is its layer.
+
+     WHY THIS IS INTERESTING: a component's accuracy_drop is how far the task accuracy falls when
+     that one neuron/head is switched off (ablated) -- a big drop means the model leaned on it, so
+     it's an "important" component for the task. Plotting run A's drops against run B's asks whether
+     the SAME components carry the task in both settings. Points near the y=x line are equally
+     load-bearing in both (a shared mechanism); points far off it matter in one setting but not the
+     other (the model solves the two settings with different circuitry).
+
+Nothing here needs editing to run -- the layer count, head count and MLP/head split (num_mlp) all
+come from each file's saved metadata, and every .pt in --dir is used as a setting (labelled by its
+filename, which is how it appears on the scatter axes and in the saved figure names).
 
 WHAT YOU NEED FIRST (read this before running): each ablation entry must carry an `accuracy_drop`,
 which intervention mode records via `is_correct` in src/main.py. That default scores a row correct
 when the model's answer (row["result"]["answer"]["token"]) equals an "answer" stored in that
 prompt's metadata, so the drops are only meaningful if your prompts carry a ground-truth "answer"
 (see PromptDataset.generate_prompts in src/utils/dataset.py) AND `is_correct` matches your task.
-Without that, every drop is 0 and the heatmap is blank. See the `load_ablations` docstring for the
+Without that, every drop is 0 and the figures are blank. See the `load_ablations` docstring for the
 exact fields expected.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
-  - The three task-agnostic helpers are the reusable core; they know nothing about your task:
-      load_ablations(pt_path)  -- read an intervention file's per-component summary (drops the heavy
-                                  per-prompt rows so only the small {layer, feature, drop, ...} list
-                                  stays in memory).
+  - The task-agnostic helpers are the reusable core; they know nothing about your task:
+      load_ablations(pt_path)  -- read an intervention file's per-component summary + metadata (drops
+                                  the heavy per-prompt rows so only the small summary stays in memory).
       neuron_label(...)        -- a readable component tag, e.g. "L0MLP1" / "L2A2".
-      _save_heatmap(matrix, …) -- render ANY [rows x cols] matrix as a 0-centered diverging heatmap.
-  - `make_heatmap` is the one figure built on those helpers. Copy it as a template for your own
-    matrix-shaped views (e.g. average the drop across several files, or restrict to attention heads).
-  - A common next figure is a SCATTER comparing two runs/conditions (which components matter in
-    setting A vs setting B). A worked, commented `make_scatter` example sits just above `__main__`
-    below -- uncomment it, then call it from `__main__` with two intervention files.
+      _layer_color_map(layers) -- the shared per-layer colours used across every figure.
+      _save_heatmap(matrix, …) -- render ANY [rows x cols] matrix as a 0-centered diverging heatmap
+                                  (supports per-layer coloured ticks and layer-block dividers).
+  - `make_layer_component_heatmap` / `make_setting_component_heatmap` are the heatmaps, built on those
+    helpers via the `_drop_matrix` / `_flat_drop_matrix` shapers. Copy one as a template for your own
+    matrix-shaped views (e.g. average the drop across several runs, or restrict to a layer range).
+  - `make_scatter` / `make_scatter_matrix` are the second figure: a per-component scatter of run A
+    vs run B (shape = type, colour = layer), drawn for every pair of runs. Copy `make_scatter` as a
+    template for other two-run comparisons (e.g. plot only heads, or size points by effect).
 """
 
 import argparse
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -42,19 +70,21 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
 import torch  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatter legends)
 
 
-def load_ablations(pt_path: Path) -> list[dict[str, Any]] | None:
-    """Load one intervention file's per-component ablation summary, dropping the heavy result rows.
+def load_ablations(pt_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+    """Load one intervention file's per-component ablation summary + metadata, dropping heavy rows.
 
     Args:
         pt_path: A .pt file written by `src/main.py --intervention` (has an "ablations" key).
 
     Returns:
-        A list of {layer_idx, type, local_idx, feature_idx, accuracy_drop} dicts -- one per ablated
-        component -- or None if the file is absent, empty (a still-running / failed run), or not an
-        intervention file. The large per-prompt `result` rows are discarded here, so only the small
-        summary stays in memory (each .pt can be ~1GB).
+        (summary, metadata), or None if the file is absent, empty (a still-running / failed run), or
+        not an intervention file. `summary` is a list of {layer_idx, type, local_idx, feature_idx,
+        accuracy_drop} dicts (one per ablated component); `metadata` is the run's saved metadata dict
+        (layer_indices, num_attention_heads, num_mlp_neurons, ...). The large per-prompt `result`
+        rows are discarded here, so only the small summary + metadata stay in memory (each .pt ~1GB).
 
     Raises:
         KeyError: if the ablations don't record `accuracy_drop` (see this module's docstring -- you
@@ -82,8 +112,25 @@ def load_ablations(pt_path: Path) -> list[dict[str, Any]] | None:
         }
         for a in loaded["ablations"]
     ]
+    metadata = loaded.get("metadata", {})
     del loaded  # free the heavy result rows we don't need before anything else loads
-    return summary
+    return summary, metadata
+
+
+def infer_num_mlp(ablations: list[dict[str, Any]], metadata: dict[str, Any]) -> int | None:
+    """Where the head columns begin (d_mlp), read from the file so you never pass it on the CLI.
+
+    Prefers metadata["num_mlp_neurons"] (main.py saves it). Falls back for older files that lack it:
+    a head's feature_idx is num_mlp + its local_idx (the shared main.py/lasso.py index convention),
+    so any head ablation gives num_mlp = feature_idx - local_idx. Returns None only if neither is
+    available (no saved value AND no head was ablated) -- then the MLP|head split can't be placed.
+    """
+    if metadata.get("num_mlp_neurons") is not None:
+        return int(metadata["num_mlp_neurons"])
+    for a in ablations:
+        if a["type"] == "head":
+            return a["feature_idx"] - a["local_idx"]
+    return None
 
 
 def neuron_label(layer_idx: int, feat_type: str, local_idx: int) -> str:
@@ -92,44 +139,105 @@ def neuron_label(layer_idx: int, feat_type: str, local_idx: int) -> str:
     return f"L{layer_idx}{kind}{local_idx}"
 
 
-def make_heatmap(
-    ablations: list[dict[str, Any]],
-    layer_indices: list[int],
-    num_mlp: int,
-    num_heads: int,
-    out: Path,
-) -> None:
-    """Layer x within-layer-component heatmap of accuracy_drop from one intervention file.
+# Heatmaps are split by component TYPE (the "shape" distinction from the scatter) and use the SAME
+# per-layer colours (via _layer_color_map) on the layer axis, so the two figure families read alike.
+TYPE_NOUN = {"mlp": "MLP neuron", "head": "attention head"}
 
-    Each column is a component within a layer: indices 0..num_mlp-1 are MLP neurons, the rest are
-    attention heads (this is the same feature-index convention main.py / lasso.py use). A component
-    that wasn't ablated is left as NaN, drawn grey, so you only see the ones the run actually tested.
+
+def _drop_matrix(ablations: list[dict[str, Any]], layers: list[int], count: int, feat_type: str) -> np.ndarray:
+    """[layers x within-layer index] matrix of accuracy_drop for ONE component type (NaN elsewhere).
+
+    `count` is num_mlp (for feat_type "mlp") or num_heads (for "head"); columns are the within-type
+    local index (a["local_idx"]). Un-ablated cells stay NaN so _save_heatmap draws them grey.
+    """
+    row_of = {layer: i for i, layer in enumerate(layers)}
+    matrix = np.full((len(layers), count), np.nan, dtype=float)
+    for a in ablations:
+        if a["type"] == feat_type and a["layer_idx"] in row_of and 0 <= a["local_idx"] < count:
+            matrix[row_of[a["layer_idx"]], a["local_idx"]] = a["accuracy_drop"]
+    return matrix
+
+
+def _flat_drop_matrix(
+    ablations_by_setting: dict[str, list[dict[str, Any]]], layers: list[int], count: int, feat_type: str
+) -> tuple[np.ndarray, list[str]]:
+    """[settings x (layer, within-layer index)] matrix for ONE type; the (layer, idx) axis is flattened.
+
+    Column for (layer, local_idx) is layer_position * count + local_idx, so each layer occupies a
+    contiguous block of `count` columns and the width is len(layers) * count. Returns (matrix, the
+    setting labels in row order).
+    """
+    layer_pos = {layer: i for i, layer in enumerate(layers)}
+    settings = list(ablations_by_setting)
+    matrix = np.full((len(settings), len(layers) * count), np.nan, dtype=float)
+    for si, setting in enumerate(settings):
+        for a in ablations_by_setting[setting]:
+            if a["type"] == feat_type and a["layer_idx"] in layer_pos and 0 <= a["local_idx"] < count:
+                matrix[si, layer_pos[a["layer_idx"]] * count + a["local_idx"]] = a["accuracy_drop"]
+    return matrix, settings
+
+
+def make_layer_component_heatmap(
+    label: str, ablations: list[dict[str, Any]], layers: list[int], count: int, feat_type: str, out: Path
+) -> None:
+    """Layer (rows) x within-layer <type> index (cols) heatmap for ONE run -- plots 1 (mlp) and 2 (head).
+
+    Rows are layers, coloured with the shared per-layer palette; cells are the accuracy_drop of that
+    component in this run (grey where it wasn't ablated).
 
     Args:
-        ablations: The summary list from `load_ablations`.
-        layer_indices: The layers captured in the run (the heatmap's rows), from the file metadata.
-        num_mlp: Number of MLP neurons per layer (d_mlp) -- where the head columns begin.
-        num_heads: Number of attention heads per layer.
+        label: The setting's name (goes in the title).
+        ablations: That setting's summary list from `load_ablations`.
+        layers: The run's layers (rows), in order.
+        count: num_mlp (feat_type "mlp") or num_heads (feat_type "head") -- the number of columns.
+        feat_type: "mlp" or "head".
         out: Path to write the .png to.
     """
-    num_per_layer = num_mlp + num_heads
-    rows = sorted(set(layer_indices))
-    row_of = {layer: i for i, layer in enumerate(rows)}
-
-    matrix = np.full((len(rows), num_per_layer), np.nan, dtype=float)
-    for a in ablations:
-        if a["layer_idx"] in row_of and 0 <= a["feature_idx"] < num_per_layer:
-            matrix[row_of[a["layer_idx"]], a["feature_idx"]] = a["accuracy_drop"]
-
+    matrix = _drop_matrix(ablations, layers, count, feat_type)
+    layer_color = _layer_color_map(layers)
+    noun = TYPE_NOUN[feat_type]
     _save_heatmap(
         matrix,
-        row_labels=[f"L{layer}" for layer in rows],
-        xlabel=f"component index  [MLP 0..{num_mlp - 1} | heads {num_mlp}..{num_per_layer - 1}]",
+        row_labels=[f"L{layer}" for layer in layers],
+        row_colors=[layer_color[layer] for layer in layers],
+        xlabel=f"{noun} index (0..{count - 1})",
         ylabel="layer",
-        title="Ablation accuracy drop per component",
+        title=f"{label}: {noun} ablation accuracy drop",
         out=out,
-        col_tick_step=max(num_per_layer // 16, 1),
-        mlp_boundary=num_mlp,
+        col_tick_step=max(count // 16, 1),
+    )
+
+
+def make_setting_component_heatmap(
+    ablations_by_setting: dict[str, list[dict[str, Any]]], layers: list[int], count: int, feat_type: str, out: Path
+) -> None:
+    """Setting (rows) x flattened (layer, <type> index) (cols) heatmap -- plots 3 (mlp) and 4 (head).
+
+    One row per setting, so you can read a single component's accuracy_drop DOWN a column to compare
+    it across runs. The x-axis flattens (layer, index) into len(layers) * count columns; each layer's
+    block is separated by a divider and labelled with a layer-coloured "L{layer}" tick at its centre.
+
+    Args:
+        ablations_by_setting: {setting label: summary list}, one entry per run (rows, in this order).
+        layers: The layers to lay out along x (usually the union across settings), in order.
+        count: num_mlp (feat_type "mlp") or num_heads (feat_type "head") -- columns per layer block.
+        feat_type: "mlp" or "head".
+        out: Path to write the .png to.
+    """
+    matrix, settings = _flat_drop_matrix(ablations_by_setting, layers, count, feat_type)
+    layer_color = _layer_color_map(layers)
+    noun = TYPE_NOUN[feat_type]
+    _save_heatmap(
+        matrix,
+        row_labels=settings,
+        xlabel=f"(layer, {noun} index) flattened -- each layer block spans index 0..{count - 1}",
+        ylabel="setting",
+        title=f"{noun} ablation accuracy drop per setting",
+        out=out,
+        col_ticks=[i * count + count // 2 for i in range(len(layers))],  # one tick per layer block, centred
+        col_tick_labels=[f"L{layer}" for layer in layers],
+        col_tick_colors=[layer_color[layer] for layer in layers],
+        col_dividers=[i * count for i in range(1, len(layers))],  # split the layer blocks
     )
 
 
@@ -140,9 +248,12 @@ def _save_heatmap(
     ylabel: str,
     title: str,
     out: Path,
-    col_tick_step: int,
-    mlp_boundary: int | None = None,
+    col_tick_step: int | None = None,
+    col_ticks: list[int] | None = None,
     col_tick_labels: list[str] | None = None,
+    col_tick_colors: list[Any] | None = None,
+    col_dividers: list[int] | None = None,
+    row_colors: list[Any] | None = None,
 ) -> None:
     """Render a (rows x many-cols) value matrix with a 0-centered diverging colormap via imshow.
 
@@ -156,9 +267,12 @@ def _save_heatmap(
         ylabel: Y-axis label.
         title: Figure title.
         out: Path to write the .png to.
-        col_tick_step: Label every Nth column index (ignored if col_tick_labels is given).
-        mlp_boundary: If set, draw a vertical divider before this column (the MLP|head split).
-        col_tick_labels: Explicit per-column labels (for narrow plots); overrides col_tick_step.
+        col_tick_step: Label every Nth column index (used when col_ticks is not given).
+        col_ticks: Explicit x positions to tick (pair with col_tick_labels); overrides col_tick_step.
+        col_tick_labels: Labels for col_ticks (defaults to the positions themselves).
+        col_tick_colors: One colour per x tick label (e.g. a per-layer colour).
+        col_dividers: X positions to draw a vertical divider before (e.g. layer-block boundaries).
+        row_colors: One colour per row tick label (e.g. a per-layer colour).
     """
     finite = matrix[np.isfinite(matrix)]
     vmax = float(np.max(np.abs(finite))) if finite.size and np.any(finite) else 1.0
@@ -173,76 +287,234 @@ def _save_heatmap(
 
     ax.set_yticks(range(len(row_labels)))
     ax.set_yticklabels(row_labels)
-    if col_tick_labels is not None:
-        ax.set_xticks(range(len(col_tick_labels)))
-        ax.set_xticklabels(col_tick_labels, fontsize=7, rotation=90)
+    if row_colors is not None:
+        for tick, color in zip(ax.get_yticklabels(), row_colors):
+            tick.set_color(color)
+
+    if col_ticks is not None:
+        ax.set_xticks(col_ticks)
+        ax.set_xticklabels(col_tick_labels if col_tick_labels is not None else col_ticks, fontsize=7, rotation=90)
     else:
-        xticks = list(range(0, matrix.shape[1], col_tick_step))
+        step = col_tick_step or max(matrix.shape[1] // 16, 1)
+        xticks = list(range(0, matrix.shape[1], step))
         ax.set_xticks(xticks)
         ax.set_xticklabels(xticks, fontsize=6, rotation=90)
+    if col_tick_colors is not None:
+        for tick, color in zip(ax.get_xticklabels(), col_tick_colors):
+            tick.set_color(color)
 
-    if mlp_boundary is not None:
-        ax.axvline(mlp_boundary - 0.5, color="black", linewidth=0.8)
+    for divider in col_dividers or []:
+        ax.axvline(divider - 0.5, color="black", linewidth=0.8)
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    fig.savefig(out, dpi=150, bbox_inches="tight")
+    fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved {out}")
 
 
-# ----------------------------------------------------------------------------------- #
-# EXAMPLE -- extend with your own figure. A scatter comparing two intervention runs (e.g.
-# two conditions, or two models): each point is one component, x = its accuracy_drop in run
-# A, y = in run B. A component flagged in only one run is 0-filled on the other axis, so it
-# lands on an axis; the y=x line marks components equally important to both. Uncomment, then
-# call it from `__main__` below with two .pt files.
-#
-#     def make_scatter(file_a: Path, file_b: Path, out: Path) -> None:
-#         """Scatter of per-component accuracy_drop in run A (x) vs run B (y)."""
-#         # Key each component by (layer, feature) so the same component lines up across runs.
-#         a = {(r["layer_idx"], r["feature_idx"]): r for r in (load_ablations(file_a) or [])}
-#         b = {(r["layer_idx"], r["feature_idx"]): r for r in (load_ablations(file_b) or [])}
-#         fig, ax = plt.subplots(figsize=(8, 8))
-#         for key in sorted(set(a) | set(b)):
-#             info = a.get(key) or b.get(key)                   # label info from whichever run has it
-#             x = a[key]["accuracy_drop"] if key in a else 0.0  # 0-fill: not flagged in run A
-#             y = b[key]["accuracy_drop"] if key in b else 0.0  # 0-fill: not flagged in run B
-#             ax.scatter(x, y, s=28, alpha=0.7)
-#             ax.annotate(neuron_label(info["layer_idx"], info["type"], info["local_idx"]), (x, y), fontsize=5)
-#         ax.axline((0, 0), slope=1, linestyle="--", color="grey")  # y = x: equally important to both
-#         ax.set_xlabel("accuracy drop (run A)")
-#         ax.set_ylabel("accuracy drop (run B)")
-#         fig.savefig(out, dpi=150, bbox_inches="tight")
-#         plt.close(fig)
-#         print(f"  saved {out}")
-# ----------------------------------------------------------------------------------- #
+# Point STYLE for the scatter: shape encodes the component type, colour (below) encodes its layer.
+TYPE_MARKER = {"mlp": "o", "head": "*"}  # MLP neuron = circle, attention head = star
+
+
+def _layer_color_map(layers: list[int]) -> dict[int, Any]:
+    """Give each layer its own colour: a categorical palette for a few layers, sampled if many."""
+    if len(layers) <= 10:
+        cmap = plt.get_cmap("tab10")  # 10 distinct, well-separated colours
+        return {layer: cmap(i) for i, layer in enumerate(layers)}
+    if len(layers) <= 20:
+        cmap = plt.get_cmap("tab20")
+        return {layer: cmap(i) for i, layer in enumerate(layers)}
+    cmap = plt.get_cmap("viridis")  # too many for a categorical palette -> sample a continuous one
+    return {layer: cmap(i / (len(layers) - 1)) for i, layer in enumerate(layers)}
+
+
+def make_scatter(
+    label_a: str,
+    ablations_a: list[dict[str, Any]],
+    label_b: str,
+    ablations_b: list[dict[str, Any]],
+    out: Path,
+) -> None:
+    """Scatter of per-component accuracy_drop in setting A (x) vs setting B (y).
+
+    accuracy_drop is baseline accuracy minus the accuracy after ablating (switching off) that one
+    component -- both accuracies are the fraction of prompts answered correctly, so the drop is the
+    AVERAGE change in performance across the run's prompts. A larger value means the model relied on
+    that component more. Each point is one component (neuron or head), keyed by (layer_idx,
+    feature_idx) so the SAME component lines up across the two runs -- letting you see whether a
+    component that mattered in setting A also mattered in setting B.
+
+    Each point is styled to show WHICH component it is: its SHAPE is the component type (circle = MLP
+    neuron, star = attention head) and its COLOUR is the layer (e.g. a layer-0 head is a star in the
+    layer-0 colour, a layer-1 neuron a circle in the layer-1 colour). Two legends decode the shapes
+    and the layer colours.
+
+    A component ablated in only one setting is 0-filled on the other axis -- read as "that run didn't
+    test it, so assume ~no effect there" -- so it lands on an axis. The dashed y=x line marks
+    components equally important to both settings; points far off it matter more in one than the
+    other (evidence the two settings use partly different internal mechanisms).
+
+    Args:
+        label_a: Name of setting A (x-axis).
+        ablations_a: Setting A's summary list from `load_ablations`.
+        label_b: Name of setting B (y-axis).
+        ablations_b: Setting B's summary list from `load_ablations`.
+        out: Path to write the .png to.
+    """
+    a = {(r["layer_idx"], r["feature_idx"]): r for r in ablations_a}
+    b = {(r["layer_idx"], r["feature_idx"]): r for r in ablations_b}
+    keys = sorted(set(a) | set(b))
+    layers = sorted({layer for layer, _ in keys})
+    layer_color = _layer_color_map(layers)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    for key in keys:
+        info = a.get(key) or b.get(key)  # label info from whichever run has this component
+        x = a[key]["accuracy_drop"] if key in a else 0.0  # 0-fill: not tested in setting A
+        y = b[key]["accuracy_drop"] if key in b else 0.0  # 0-fill: not tested in setting B
+        ax.scatter(
+            x,
+            y,
+            marker=TYPE_MARKER.get(info["type"], "o"),  # shape = component type
+            color=layer_color[info["layer_idx"]],  # colour = layer
+            s=45,
+            alpha=0.8,
+            edgecolors="none",
+        )
+        ax.annotate(neuron_label(info["layer_idx"], info["type"], info["local_idx"]), (x, y), fontsize=4, alpha=0.6)
+
+    ax.axline((0, 0), slope=1, linestyle="--", color="grey")  # y = x: equally important to both
+    ax.set_xlabel(f"avg accuracy drop ({label_a})")
+    ax.set_ylabel(f"avg accuracy drop ({label_b})")
+    ax.set_title(f"Per-component ablation effect: {label_a} vs {label_b}")
+
+    # Two legends: one decoding the SHAPES (component type), one the COLOURS (layer). Both use grey/
+    # neutral proxy markers for the type legend so it reads as "shape only", and per-layer colours for
+    # the layer legend. add_artist keeps the first legend when the second is drawn.
+    type_handles = [
+        Line2D([], [], marker=TYPE_MARKER["mlp"], linestyle="none", color="grey", label="MLP neuron"),
+        Line2D([], [], marker=TYPE_MARKER["head"], linestyle="none", color="grey", label="attention head"),
+    ]
+    layer_handles = [
+        Line2D([], [], marker="s", linestyle="none", color=layer_color[layer], label=f"layer {layer}")
+        for layer in layers
+    ]
+    ax.add_artist(ax.legend(handles=type_handles, title="component", loc="upper left", fontsize=8))
+    ax.legend(handles=layer_handles, title="layer", loc="lower right", fontsize=8, ncol=max(1, len(layers) // 12))
+
+    fig.savefig(out, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  saved {out}")
+
+
+def make_scatter_matrix(ablations_by_setting: dict[str, list[dict[str, Any]]], out_dir: Path) -> None:
+    """Draw one `make_scatter` per PAIR of settings (all combinations) into out_dir.
+
+    Args:
+        ablations_by_setting: {label: summary list from load_ablations}, one entry per setting.
+        out_dir: Directory to write scatter_<A>_vs_<B>.png files into (created if absent).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for label_a, label_b in itertools.combinations(ablations_by_setting, 2):  # every pair, in order
+        out = out_dir / f"scatter_{label_a}_vs_{label_b}.png"
+        make_scatter(label_a, ablations_by_setting[label_a], label_b, ablations_by_setting[label_b], out)
+
+
+def discover_settings(directory: Path) -> dict[str, Path]:
+    """The settings to plot: every .pt in `directory`, labelled by filename (stem).
+
+    Mirrors how src/lasso.py takes a --dir of runs. Non-intervention .pt files are filtered out later
+    by load_ablations (it returns None for them), so this can safely list every .pt it finds.
+    """
+    return {path.stem: path for path in sorted(directory.glob("*.pt"))}
+
+
+def load_settings(settings: dict[str, Path]) -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
+    """Load each setting's .pt once, keeping only the ones with usable ablations.
+
+    Args:
+        settings: {label: intervention .pt path} (from discover_settings).
+
+    Returns:
+        {label: (summary, metadata)} for the files that loaded -- missing/empty/non-intervention
+        files are skipped (load_ablations prints why). Loading once here means the ~1GB files are
+        each read a single time, then both the heatmaps and the scatter matrix reuse the summaries.
+    """
+    loaded = {}
+    for label, path in settings.items():
+        result = load_ablations(Path(path))
+        if result and result[0]:  # has ablations
+            loaded[label] = result
+    return loaded
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Plot intervention/ablation effects (accuracy-drop heatmap).")
-    parser.add_argument("--file", "-f", required=True, help="An intervention .pt file from src/main.py.")
+    parser = argparse.ArgumentParser(description="Plot intervention/ablation effects (heatmaps + scatter matrix).")
     parser.add_argument(
-        "--num-mlp-neurons",
-        type=int,
+        "--dir",
+        "-d",
         required=True,
-        help="MLP neurons per layer (d_mlp) -- where head columns begin. It's lasso.json's "
-        "num_mlp_neurons, or your model's intermediate size.",
+        help="Directory of intervention .pt files from src/main.py (like src/lasso.py's --dir). Each "
+        "file is one setting; layer/head/MLP counts are read from each file, so nothing else is needed.",
     )
-    parser.add_argument("--output", "-o", default="heatmap_ablations.png", help="Where to write the figure.")
+    parser.add_argument("--output", "-o", default="plots", help="Directory to write the figures into.")
     args = parser.parse_args()
 
-    pt_path = Path(args.file)
-    ablations = load_ablations(pt_path)
-    if not ablations:
-        raise SystemExit(f"No usable ablations in {pt_path}")
-
-    # Layer indices and head count come from the metadata main.py saved alongside the ablations.
-    metadata = torch.load(pt_path, map_location="cpu", weights_only=False).get("metadata", {})
-    layer_indices = metadata.get("layer_indices", sorted({a["layer_idx"] for a in ablations}))
-    num_heads = metadata.get("num_attention_heads", 0)
-
     sns.set_theme(style="whitegrid")
-    make_heatmap(ablations, layer_indices, args.num_mlp_neurons, num_heads, Path(args.output))
-    print(f"Done. Figure at {args.output}")
+
+    # Each .pt in --dir is one setting, labelled by its filename.
+    settings = discover_settings(Path(args.dir))
+    if not settings:
+        raise SystemExit(f"No .pt files found in {args.dir}.")
+
+    loaded = load_settings(settings)  # {label: (summary, metadata)}; each ~1GB file read once
+    if not loaded:
+        raise SystemExit(
+            f"No usable intervention runs among {sorted(settings)} -- the .pt files may be incomplete "
+            "or not intervention outputs (need an 'ablations' key). See the [skip] notes above."
+        )
+
+    out_dir = Path(args.output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    abl_by_setting = {label: ablations for label, (ablations, _) in loaded.items()}
+
+    # (1 & 2) Per setting: one layer x MLP-neuron heatmap and one layer x attention-head heatmap.
+    # Everything each needs (layers, head count, MLP/head split) comes from that file's own metadata,
+    # with infer_num_mlp as a fallback for files saved before main.py recorded num_mlp_neurons.
+    for label, (ablations, metadata) in loaded.items():
+        layers = metadata.get("layer_indices") or sorted({a["layer_idx"] for a in ablations})
+        num_heads = metadata.get("num_attention_heads", 0)
+        num_mlp = infer_num_mlp(ablations, metadata)
+        if num_mlp:
+            make_layer_component_heatmap(label, ablations, layers, num_mlp, "mlp", out_dir / f"heatmap_{label}_mlp.png")
+        else:
+            print(f"  [skip {label} MLP heatmap]: can't tell where heads start (no num_mlp_neurons and "
+                  "no head was ablated).")
+        if num_heads:
+            make_layer_component_heatmap(label, ablations, layers, num_heads, "head", out_dir / f"heatmap_{label}_heads.png")
+
+    # (3 & 4) Across settings (needs >= 2): setting x flattened (layer, component) heatmaps, one for
+    # MLP neurons and one for heads. Use the union of layers and the largest MLP/head counts so runs
+    # with different sizes still line up (absent cells stay grey), matching the scatter's 0-fill idea.
+    if len(loaded) >= 2:
+        all_layers = sorted(
+            {layer for _, meta in loaded.values() for layer in (meta.get("layer_indices") or [])}
+            or {a["layer_idx"] for ablations in abl_by_setting.values() for a in ablations}
+        )
+        max_mlp = max((infer_num_mlp(ablations, meta) or 0) for ablations, meta in loaded.values())
+        max_heads = max(meta.get("num_attention_heads", 0) for _, meta in loaded.values())
+        if max_mlp:
+            make_setting_component_heatmap(abl_by_setting, all_layers, max_mlp, "mlp", out_dir / "heatmap_settings_mlp.png")
+        if max_heads:
+            make_setting_component_heatmap(abl_by_setting, all_layers, max_heads, "head", out_dir / "heatmap_settings_heads.png")
+
+        # Scatter for every pair of settings. Reuses the summaries already loaded.
+        make_scatter_matrix(abl_by_setting, out_dir)
+    else:
+        print(f"  only one usable setting ({next(iter(loaded))}) -- add more intervention runs to --dir "
+              "for the setting-vs-setting heatmaps and scatters.")
+
+    print(f"Done. Figures in {out_dir}/")

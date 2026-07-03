@@ -110,6 +110,7 @@ if __name__ == "__main__":
                 "max_new_tokens": args.max_new_tokens,
                 "num_attention_heads": model.cfg.n_heads,
                 "head_dim": model.cfg.d_head,
+                "num_mlp_neurons": model.cfg.d_mlp,
             },
         }
 
@@ -188,6 +189,7 @@ if __name__ == "__main__":
                 "max_new_tokens": args.max_new_tokens,
                 "num_attention_heads": model.cfg.n_heads,
                 "head_dim": model.cfg.d_head,
+                "num_mlp_neurons": model.cfg.d_mlp,
                 "intervention": args.intervention,
             },
         }

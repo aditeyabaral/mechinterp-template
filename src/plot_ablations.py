@@ -283,6 +283,7 @@ def _save_heatmap(
     width = min(max(matrix.shape[1] / 80.0, 8.0), 40.0)
     fig, ax = plt.subplots(figsize=(width, 1.2 + 0.5 * matrix.shape[0]))
     im = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
+    ax.grid(False)  # the seaborn theme's gridlines would otherwise show over the heatmap cells
     fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01, label="accuracy drop")
 
     ax.set_yticks(range(len(row_labels)))
@@ -342,9 +343,10 @@ def make_scatter(
     accuracy_drop is baseline accuracy minus the accuracy after ablating (switching off) that one
     component -- both accuracies are the fraction of prompts answered correctly, so the drop is the
     AVERAGE change in performance across the run's prompts. A larger value means the model relied on
-    that component more. Each point is one component (neuron or head), keyed by (layer_idx,
-    feature_idx) so the SAME component lines up across the two runs -- letting you see whether a
-    component that mattered in setting A also mattered in setting B.
+    that component more. Each point is one component (neuron or head), keyed by (layer_idx, type,
+    local_idx) so the SAME component lines up across the two runs -- letting you see whether a
+    component that mattered in setting A also mattered in setting B. (We key on type + local_idx, not
+    the flattened feature_idx, so runs with different num_mlp -- e.g. different models -- still align.)
 
     Each point is styled to show WHICH component it is: its SHAPE is the component type (circle = MLP
     neuron, star = attention head) and its COLOUR is the layer (e.g. a layer-0 head is a star in the
@@ -363,10 +365,10 @@ def make_scatter(
         ablations_b: Setting B's summary list from `load_ablations`.
         out: Path to write the .png to.
     """
-    a = {(r["layer_idx"], r["feature_idx"]): r for r in ablations_a}
-    b = {(r["layer_idx"], r["feature_idx"]): r for r in ablations_b}
+    a = {(r["layer_idx"], r["type"], r["local_idx"]): r for r in ablations_a}
+    b = {(r["layer_idx"], r["type"], r["local_idx"]): r for r in ablations_b}
     keys = sorted(set(a) | set(b))
-    layers = sorted({layer for layer, _ in keys})
+    layers = sorted({key[0] for key in keys})
     layer_color = _layer_color_map(layers)
 
     fig, ax = plt.subplots(figsize=(8, 8))

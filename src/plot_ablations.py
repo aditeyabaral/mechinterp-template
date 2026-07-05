@@ -75,7 +75,6 @@ import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatter legends)
 
-# The task-agnostic loaders live in utils/ablations.py so plot_circuits.py can reuse them too.
 from utils.ablations import discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
 
 # Heatmaps are split by component TYPE (the "shape" distinction from the scatter) and use the SAME

@@ -18,7 +18,7 @@ The extension points, in the order you'll likely touch them:
   4. src/utils/parser.py   add_arguments                   -- add any task-specific CLI arguments.
   5. src/utils/dir.py      generate_output_path            -- name your saved output files.
   6. "Intervention mode" below                             -- the format of your --intervention spec file.
-  7. src/main.py           is_correct                      -- how an answer is scored right (ablation accuracy).
+  7. src/utils/scoring.py  is_correct                      -- how an answer is scored right (ablation accuracy).
 
 To train a small model from scratch first, see src/train/ (tokenizer -> dataset -> model),
 which has its own TODO markers.
@@ -37,22 +37,7 @@ from tqdm.auto import tqdm
 import inference
 import utils
 from model import load_model
-
-
-def is_correct(row: dict) -> bool:
-    """Whether the model's generated answer matches the ground truth for one result row.
-
-    Used to score intervention runs (baseline vs ablated accuracy). The default compares the answer
-    token inference.py captured (row["result"]["answer"]["token"]) against an "answer" stored in
-    that prompt's metadata (see PromptDataset.generate_prompts in src/utils/dataset.py). It
-    therefore only does something useful if your prompts carry a ground-truth "answer" in their
-    metadata; otherwise every row counts as wrong and the accuracies come out 0.
-
-    TODO (optional): adjust this if "correct" means something else for your task, or if your
-    metadata stores the truth under a different key.
-    """
-    return row["result"]["answer"]["token"] == row["metadata"].get("answer")
-
+from utils.scoring import is_correct
 
 if __name__ == "__main__":
     # 1. Parse CLI arguments (defined in src/utils/parser.py).
@@ -132,7 +117,7 @@ if __name__ == "__main__":
         ablations: list[dict] = []
 
         # Baseline accuracy (no ablation): the reference each ablated run is compared against to get
-        # its accuracy_drop. See `is_correct` above for how "correct" is decided.
+        # its accuracy_drop. See `is_correct` in src/utils/scoring.py for how "correct" is decided.
         baseline_accuracy = sum(1 for row in result if is_correct(row)) / len(result) if result else 0.0
 
         layers_iter = tqdm(list(analysis["layers"].items()), desc="Layers", position=0)

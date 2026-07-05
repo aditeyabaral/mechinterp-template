@@ -43,10 +43,14 @@ Without that, every drop is 0 and the figures are blank. See the `load_ablations
 exact fields expected.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
-  - The task-agnostic helpers are the reusable core; they know nothing about your task:
+  - The task-agnostic loaders live in src/utils/ablations.py (shared with src/plot_circuits.py); they
+    know nothing about your task:
       load_ablations(pt_path)  -- read an intervention file's per-component summary + metadata (drops
                                   the heavy per-prompt rows so only the small summary stays in memory).
+      infer_num_mlp(...)       -- where the head columns begin (the MLP|head split), read from the file.
+      discover_settings/load_settings -- list + load every .pt in a --dir once.
       neuron_label(...)        -- a readable component tag, e.g. "L0MLP1" / "L2A2".
+  - The reusable figure helpers here (still task-agnostic):
       _layer_color_map(layers) -- the shared per-layer colours used across every figure.
       _save_heatmap(matrix, …) -- render ANY [rows x cols] matrix as a 0-centered diverging heatmap
                                   (supports per-layer coloured ticks and layer-block dividers).
@@ -69,75 +73,10 @@ matplotlib.use("Agg")  # headless backend: render to a file without a display se
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
-import torch  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatter legends)
 
-
-def load_ablations(pt_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
-    """Load one intervention file's per-component ablation summary + metadata, dropping heavy rows.
-
-    Args:
-        pt_path: A .pt file written by `src/main.py --intervention` (has an "ablations" key).
-
-    Returns:
-        (summary, metadata), or None if the file is absent, empty (a still-running / failed run), or
-        not an intervention file. `summary` is a list of {layer_idx, type, local_idx, feature_idx,
-        accuracy_drop} dicts (one per ablated component); `metadata` is the run's saved metadata dict
-        (layer_indices, num_attention_heads, num_mlp_neurons, ...). The large per-prompt `result`
-        rows are discarded here, so only the small summary + metadata stay in memory (each .pt ~1GB).
-
-    Raises:
-        KeyError: if the ablations don't record `accuracy_drop` (see this module's docstring -- you
-            need to add accuracy scoring to intervention mode first).
-    """
-    if not pt_path.exists() or pt_path.stat().st_size == 0:
-        print(f"  [skip] {pt_path.name}: missing or empty (incomplete run)")
-        return None
-    loaded = torch.load(pt_path, map_location="cpu", weights_only=False)
-    if "ablations" not in loaded:
-        print(f"  [skip] {pt_path.name}: no 'ablations' key (not an intervention file)")
-        return None
-    if loaded["ablations"] and "accuracy_drop" not in loaded["ablations"][0]:
-        raise KeyError(
-            f"{pt_path.name}: ablations have no 'accuracy_drop'. Intervention mode must score "
-            "accuracy and store accuracy_drop per ablation -- see the module docstring."
-        )
-    summary = [
-        {
-            "layer_idx": a["layer_idx"],
-            "type": a["type"],
-            "local_idx": a["local_idx"],
-            "feature_idx": a["feature_idx"],
-            "accuracy_drop": a["accuracy_drop"],
-        }
-        for a in loaded["ablations"]
-    ]
-    metadata = loaded.get("metadata", {})
-    del loaded  # free the heavy result rows we don't need before anything else loads
-    return summary, metadata
-
-
-def infer_num_mlp(ablations: list[dict[str, Any]], metadata: dict[str, Any]) -> int | None:
-    """Where the head columns begin (d_mlp), read from the file so you never pass it on the CLI.
-
-    Prefers metadata["num_mlp_neurons"] (main.py saves it). Falls back for older files that lack it:
-    a head's feature_idx is num_mlp + its local_idx (the shared main.py/lasso.py index convention),
-    so any head ablation gives num_mlp = feature_idx - local_idx. Returns None only if neither is
-    available (no saved value AND no head was ablated) -- then the MLP|head split can't be placed.
-    """
-    if metadata.get("num_mlp_neurons") is not None:
-        return int(metadata["num_mlp_neurons"])
-    for a in ablations:
-        if a["type"] == "head":
-            return a["feature_idx"] - a["local_idx"]
-    return None
-
-
-def neuron_label(layer_idx: int, feat_type: str, local_idx: int) -> str:
-    """Human-readable component tag, e.g. 'L0MLP1' (MLP neuron) or 'L2A2' (attention head)."""
-    kind = "MLP" if feat_type == "mlp" else "A"
-    return f"L{layer_idx}{kind}{local_idx}"
-
+# The task-agnostic loaders live in utils/ablations.py so plot_circuits.py can reuse them too.
+from utils.ablations import discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
 
 # Heatmaps are split by component TYPE (the "shape" distinction from the scatter) and use the SAME
 # per-layer colours (via _layer_color_map) on the layer axis, so the two figure families read alike.
@@ -422,34 +361,6 @@ def make_scatter_matrix(ablations_by_setting: dict[str, list[dict[str, Any]]], o
     for label_a, label_b in itertools.combinations(ablations_by_setting, 2):  # every pair, in order
         out = out_dir / f"scatter_{label_a}_vs_{label_b}.png"
         make_scatter(label_a, ablations_by_setting[label_a], label_b, ablations_by_setting[label_b], out)
-
-
-def discover_settings(directory: Path) -> dict[str, Path]:
-    """The settings to plot: every .pt in `directory`, labelled by filename (stem).
-
-    Mirrors how src/lasso.py takes a --dir of runs. Non-intervention .pt files are filtered out later
-    by load_ablations (it returns None for them), so this can safely list every .pt it finds.
-    """
-    return {path.stem: path for path in sorted(directory.glob("*.pt"))}
-
-
-def load_settings(settings: dict[str, Path]) -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
-    """Load each setting's .pt once, keeping only the ones with usable ablations.
-
-    Args:
-        settings: {label: intervention .pt path} (from discover_settings).
-
-    Returns:
-        {label: (summary, metadata)} for the files that loaded -- missing/empty/non-intervention
-        files are skipped (load_ablations prints why). Loading once here means the ~1GB files are
-        each read a single time, then both the heatmaps and the scatter matrix reuse the summaries.
-    """
-    loaded = {}
-    for label, path in settings.items():
-        result = load_ablations(Path(path))
-        if result and result[0]:  # has ablations
-            loaded[label] = result
-    return loaded
 
 
 if __name__ == "__main__":

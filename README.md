@@ -222,10 +222,13 @@ src/
     dataset.py           # PromptDataset: the probe prompts you run            [fill in — required]
     parser.py            # command-line arguments for main.py                  [optional extra args]
     dir.py               # builds the output filename                          [optional]
+    scoring.py           # is_correct(): whether a generated answer is right   [optional]
+    ablations.py         # shared loaders for intervention .pt files (used by the plot scripts)
   inference.py           # the activation-capture loop — the heart of the analysis
   main.py                # ENTRY POINT: run capture (+ optional intervention) and save results
   lasso.py               # OPTIONAL: rank neurons/heads by importance, write analysis.json
   plot_ablations.py      # OPTIONAL: heatmaps + cross-run scatter of ablation accuracy drops
+  plot_circuits.py       # OPTIONAL: circuit diagrams of the surviving components per setting
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
@@ -326,8 +329,8 @@ uv run python src/main.py -m <user>/my-model --num-prompts 200 --intervention an
 Re-runs the prompts, switching off each important component in turn, and for each one records the
 **accuracy drop** it causes (`baseline_accuracy - ablated_accuracy`) into a single `.pt` file — the
 bigger the drop, the more the model relied on that component. Accuracy is scored by `is_correct` in
-`src/main.py` (it compares the model's answer to the `"answer"` in each prompt's metadata; adjust it
-for your task). `src/plot_ablations.py` turns those drops into figures. Like `lasso.py`, it reads a
+`src/utils/scoring.py` (it compares the model's answer to the `"answer"` in each prompt's metadata;
+adjust it for your task). `src/plot_ablations.py` turns those drops into figures. Like `lasso.py`, it reads a
 whole **directory** of intervention runs — each `.pt` in it is one *setting* — and reads the layer
 count, head count and MLP size from the files themselves, so there is nothing else to pass:
 
@@ -348,6 +351,17 @@ Into `plots/` it writes:
 So a single intervention file already gives you the two per-run heatmaps; to get the comparisons,
 capture-and-ablate under two conditions (say, two prompt distributions or two models) and drop both
 `.pt` files in the same directory.
+
+`src/plot_circuits.py` reads the same directory of intervention runs and draws a **circuit diagram**
+instead: one column of nodes per layer (all MLP neurons + attention heads), with the components in
+the top-p percentile of accuracy drop ("survivors") coloured and connected to the survivors of the
+next layer. It writes `S + 1` images — one `circuit_<setting>.png` per setting plus a
+`circuit_combined.png` overlaying every setting's edges in its own colour — and rings the components
+that survive in *every* setting (the shared-circuit candidates):
+
+```bash
+uv run python src/plot_circuits.py --dir <dir with your intervention .pt files> --output plots --percentile 99
+```
 
 ## The capture convention (which token we read)
 
@@ -443,7 +457,7 @@ grep -rn TODO src/
 | `src/utils/parser.py` | extra task-specific command-line arguments | optional |
 | `src/utils/dir.py` | `generate_output_path` — the output filename | optional (good default) |
 | `src/lasso.py` | `assign_condition`, `build_target` — what to compare/predict | optional (good defaults) |
-| `src/main.py` | `is_correct` — whether a generated answer is right (scores ablation accuracy drops) | optional (good default) |
+| `src/utils/scoring.py` | `is_correct` — whether a generated answer is right (scores ablation accuracy drops) | optional (good default) |
 
 Each `TODO` explains *what* to do, *why*, and shows a worked example in comments. Once your model is
 trained, the analysis side **runs as soon as you implement `PromptDataset.generate_prompts`** — every
@@ -469,7 +483,7 @@ checkpoint instead, point `--model-path` at any HF repo id or local path:
 uv run python src/main.py -m gpt2 --num-prompts 200 --capture-geometry
 ```
 
-The rest of the analysis (steps 4–8) is identical. (Training your own model is recommended for
+The rest of the analysis (steps 4–7) is identical. (Training your own model is recommended for
 learning, because you control and understand the task completely.)
 
 ## Using a non-GPT-2 model

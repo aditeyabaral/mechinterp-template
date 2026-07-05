@@ -78,9 +78,9 @@ def keep_row(row: dict[str, Any], metadata: dict[str, Any]) -> bool:
     # answer token encode whatever (wrong) computation produced it, not the target behaviour --
     # pairing your target with those activations would mislabel the regression data.
     #
-    # main.py already defines this exact correctness check (its is_correct) -- import and call it so
-    # the two stay in sync, rather than duplicating the comparison here:
-    #     from main import is_correct
+    # src/utils/scoring.py already defines this exact correctness check (is_correct) -- import and
+    # call it so main.py and lasso.py stay in sync, rather than duplicating the comparison here:
+    #     from utils.scoring import is_correct
     #     return is_correct(row)
     # (is_correct assumes your prompts carry a ground-truth "answer" in their metadata -- see
     # PromptDataset.generate_prompts in src/utils/dataset.py.)

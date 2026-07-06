@@ -1,10 +1,10 @@
 """Load per-component ablation summaries from intervention .pt files.
 
 These helpers know nothing about any particular task or figure -- they just read what
-`src/main.py --intervention` saved. They are imported by BOTH src/plot_ablations.py (heatmaps +
-scatter) and src/plot_circuits.py (circuit diagrams) so the file format is parsed in exactly one
+`src/main.py --intervention` saved. They are imported by BOTH src/analysis/plot_ablations.py (heatmaps +
+scatter) and src/analysis/plot_circuits.py (circuit diagrams) so the file format is parsed in exactly one
 place. Each intervention .pt is treated as one SETTING, labelled by its filename (stem), mirroring
-how src/lasso.py takes a --dir of runs.
+how src/analysis/lasso.py takes a --dir of runs.
 """
 
 from pathlib import Path
@@ -82,7 +82,7 @@ def neuron_label(layer_idx: int, feat_type: str, local_idx: int) -> str:
 def discover_settings(directory: Path) -> dict[str, Path]:
     """The settings to plot: every .pt in `directory`, labelled by filename (stem).
 
-    Mirrors how src/lasso.py takes a --dir of runs. Non-intervention .pt files are filtered out later
+    Mirrors how src/analysis/lasso.py takes a --dir of runs. Non-intervention .pt files are filtered out later
     by load_ablations (it returns None for them), so this can safely list every .pt it finds.
     """
     return {path.stem: path for path in sorted(directory.glob("*.pt"))}

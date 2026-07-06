@@ -1,9 +1,9 @@
 """Plot the causal effect of zeroing each ablated neuron/head, from intervention .pt files.
 
-Point it at a DIRECTORY of intervention runs (exactly like src/lasso.py takes --dir)
+Point it at a DIRECTORY of intervention runs (exactly like src/analysis/lasso.py takes --dir)
 and it reads everything it needs from the files:
 
-    python src/plot_ablations.py --dir <dir of intervention .pt files> [--output plots]
+    python src/analysis/plot_ablations.py --dir <dir of intervention .pt files> [--output plots]
 
 Each .pt in the directory is one intervention run -- one `main.py --intervention` invocation.
 We call each run a SETTING. Every figure's cell/point value is accuracy_drop (baseline_accuracy -
@@ -43,7 +43,7 @@ Without that, every drop is 0 and the figures are blank. See the `load_ablations
 exact fields expected.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
-  - The task-agnostic loaders live in src/utils/ablations.py (shared with src/plot_circuits.py); they
+  - The task-agnostic loaders live in src/utils/ablations.py (shared with src/analysis/plot_circuits.py); they
     know nothing about your task:
       load_ablations(pt_path)  -- read an intervention file's per-component summary + metadata (drops
                                   the heavy per-prompt rows so only the small summary stays in memory).
@@ -52,7 +52,7 @@ WHAT YOU CAN CHANGE / HOW TO EXTEND:
       neuron_label(...)        -- a readable component tag, e.g. "L0MLP1" / "L2A2".
   - The reusable figure helpers:
       categorical_color_map(layers) -- the shared per-layer colours used across every figure (lives in
-                                  src/utils/plotting.py, shared with src/plot_circuits.py).
+                                  src/utils/plotting.py, shared with src/analysis/plot_circuits.py).
       _save_heatmap(matrix, …) -- render ANY [rows x cols] matrix as a 0-centered diverging heatmap
                                   (supports per-layer coloured ticks and layer-block dividers).
   - `make_layer_component_heatmap` / `make_setting_component_heatmap` are the heatmaps, built on those
@@ -65,6 +65,7 @@ WHAT YOU CAN CHANGE / HOW TO EXTEND:
 
 import argparse
 import itertools
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,9 @@ import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatter legends)
 
+# This script lives in src/analysis/; put src/ on the import path so utils.* resolves when run
+# as `python src/analysis/plot_ablations.py` from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from utils.ablations import common_geometry, discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
 from utils.plotting import categorical_color_map, save_figure  # noqa: E402
 
@@ -355,7 +359,7 @@ if __name__ == "__main__":
         "--dir",
         "-d",
         required=True,
-        help="Directory of intervention .pt files from src/main.py (like src/lasso.py's --dir). Each "
+        help="Directory of intervention .pt files from src/main.py (like src/analysis/lasso.py's --dir). Each "
         "file is one setting; layer/head/MLP counts are read from each file, so nothing else is needed.",
     )
     parser.add_argument("--output", "-o", default="plots", help="Directory to write the figures into.")

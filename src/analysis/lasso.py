@@ -49,6 +49,7 @@ reader in main.py's intervention block to match.
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,11 @@ import numpy as np
 import torch
 from sklearn.linear_model import LassoCV
 from sklearn.preprocessing import StandardScaler
+
+# This script lives in src/analysis/; put src/ on the import path so the shared helpers in
+# src/utils/ (e.g. utils.scoring, imported in keep_row below) resolve when you run it as
+# `python src/analysis/lasso.py` from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 def keep_row(row: dict[str, Any], metadata: dict[str, Any]) -> bool:

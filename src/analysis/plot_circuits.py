@@ -1,12 +1,12 @@
 """Draw the surviving ablation circuit as a node-and-edge diagram, from intervention .pt files.
 
-Point it at a DIRECTORY of intervention runs (exactly like src/lasso.py and src/plot_ablations.py
+Point it at a DIRECTORY of intervention runs (exactly like src/analysis/lasso.py and src/analysis/plot_ablations.py
 take --dir) and it reads everything it needs from the files:
 
-    python src/plot_circuits.py --dir <dir of intervention .pt files> [--output plots] [--percentile 99]
+    python src/analysis/plot_circuits.py --dir <dir of intervention .pt files> [--output plots] [--percentile 99]
 
 Each .pt in the directory is one intervention run -- one `main.py --intervention` invocation. As in
-src/plot_ablations.py we call each run a SETTING (each is one .pt, labelled by its filename). This
+src/analysis/plot_ablations.py we call each run a SETTING (each is one .pt, labelled by its filename). This
 script turns every setting into its own CIRCUIT DIAGRAM image, plus one combined image.
 
 WHAT A CIRCUIT DIAGRAM IS: a graph with one COLUMN of nodes per layer. Every column holds ALL the
@@ -46,10 +46,10 @@ Nothing here needs editing to run: the layer count, head count and MLP/head spli
 from each file's saved metadata (via the shared loaders in src/utils/ablations.py), and every .pt in
 --dir is used, labelled by its filename.
 
-WHAT YOU NEED FIRST: like src/plot_ablations.py, every ablation entry must carry an `accuracy_drop`
+WHAT YOU NEED FIRST: like src/analysis/plot_ablations.py, every ablation entry must carry an `accuracy_drop`
 (intervention mode records it via `is_correct` in src/main.py). If your prompts have no ground-truth
 "answer" the drops are all 0, the percentile filter keeps nothing, and the circuit is empty. See the
-src/plot_ablations.py module docstring for the exact fields and how to add accuracy scoring.
+src/analysis/plot_ablations.py module docstring for the exact fields and how to add accuracy scoring.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
   - `compute_survivors` is the whole selection rule (top-p percentile of accuracy_drop per layer).
@@ -63,6 +63,7 @@ WHAT YOU CAN CHANGE / HOW TO EXTEND:
 """
 
 import argparse
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -78,8 +79,11 @@ from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the legend
 from matplotlib.patches import PathPatch  # noqa: E402  (curved edges)
 from matplotlib.path import Path as MplPath  # noqa: E402  (curved edges)
 
-# The task-agnostic loaders live in utils/ablations.py, shared with src/plot_ablations.py; the figure
-# helpers live in utils/plotting.py (also shared).
+# This script lives in src/analysis/; put src/ on the import path so utils.* resolves when run
+# as `python src/analysis/plot_circuits.py` from the repo root.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+# The task-agnostic loaders live in utils/ablations.py, shared with src/analysis/plot_ablations.py;
+# the figure helpers live in utils/plotting.py (also shared).
 from utils.ablations import common_geometry, discover_settings, load_settings, neuron_label  # noqa: E402
 from utils.plotting import categorical_color_map, save_figure  # noqa: E402
 
@@ -463,7 +467,7 @@ if __name__ == "__main__":
         "--dir",
         "-d",
         required=True,
-        help="Directory of intervention .pt files from src/main.py (like src/plot_ablations.py's --dir). "
+        help="Directory of intervention .pt files from src/main.py (like src/analysis/plot_ablations.py's --dir). "
         "Each file is one setting; layer/head/MLP counts are read from each file.",
     )
     parser.add_argument("--output", "-o", default="plots", help="Directory to write the figures into.")

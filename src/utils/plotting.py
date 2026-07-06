@@ -1,4 +1,4 @@
-"""Small figure helpers shared by the plotting scripts (src/plot_ablations.py, src/plot_circuits.py).
+"""Small figure helpers shared by the plotting scripts (src/analysis/plot_ablations.py, src/analysis/plot_circuits.py).
 
 Kept here so the two scripts colour their categories the same way and save figures identically,
 rather than each carrying its own copy. Nothing here is task-specific -- it's pure matplotlib glue.

@@ -224,11 +224,13 @@ src/
     dir.py               # builds the output filename                          [optional]
     scoring.py           # is_correct(): whether a generated answer is right   [optional]
     ablations.py         # shared loaders for intervention .pt files (used by the plot scripts)
+    plotting.py          # shared figure helpers (colour maps, save_figure) for the plot scripts
   inference.py           # the activation-capture loop — the heart of the analysis
   main.py                # ENTRY POINT: run capture (+ optional intervention) and save results
-  lasso.py               # OPTIONAL: rank neurons/heads by importance, write analysis.json
-  plot_ablations.py      # OPTIONAL: heatmaps + cross-run scatter of ablation accuracy drops
-  plot_circuits.py       # OPTIONAL: circuit diagrams of the surviving components per setting
+  analysis/              # OPTIONAL analysis + plotting scripts (run from the repo root)
+    lasso.py             #   rank neurons/heads by importance, write analysis.json
+    plot_ablations.py    #   heatmaps + cross-run scatter of ablation accuracy drops
+    plot_circuits.py     #   circuit diagrams of the surviving components per setting
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
@@ -312,7 +314,7 @@ the current directory (its name is generated automatically from the run's parame
 ### 6. Find the important components *(optional)*
 
 ```bash
-uv run python src/lasso.py --dir . --output analysis.json
+uv run python src/analysis/lasso.py --dir . --output analysis.json
 ```
 
 Reads the `.pt` files, fits the Lasso, and writes `analysis.json` — per layer and per condition, the
@@ -330,12 +332,12 @@ Re-runs the prompts, switching off each important component in turn, and for eac
 **accuracy drop** it causes (`baseline_accuracy - ablated_accuracy`) into a single `.pt` file — the
 bigger the drop, the more the model relied on that component. Accuracy is scored by `is_correct` in
 `src/utils/scoring.py` (it compares the model's answer to the `"answer"` in each prompt's metadata;
-adjust it for your task). `src/plot_ablations.py` turns those drops into figures. Like `lasso.py`, it reads a
+adjust it for your task). `src/analysis/plot_ablations.py` turns those drops into figures. Like `lasso.py`, it reads a
 whole **directory** of intervention runs — each `.pt` in it is one *setting* — and reads the layer
 count, head count and MLP size from the files themselves, so there is nothing else to pass:
 
 ```bash
-uv run python src/plot_ablations.py --dir <dir with your intervention .pt files> --output plots
+uv run python src/analysis/plot_ablations.py --dir <dir with your intervention .pt files> --output plots
 ```
 
 Into `plots/` it writes:
@@ -352,7 +354,7 @@ So a single intervention file already gives you the two per-run heatmaps; to get
 capture-and-ablate under two conditions (say, two prompt distributions or two models) and drop both
 `.pt` files in the same directory.
 
-`src/plot_circuits.py` reads the same directory of intervention runs and draws a **circuit diagram**
+`src/analysis/plot_circuits.py` reads the same directory of intervention runs and draws a **circuit diagram**
 instead: one column of nodes per layer (all MLP neurons + attention heads), with the components in
 the top-p percentile of accuracy drop ("survivors") coloured and connected to the survivors of the
 next layer. It writes `S + 1` images — one `circuit_<setting>.png` per setting plus a
@@ -362,7 +364,7 @@ survivors layer by layer, with their accuracy drops (highest first), so the same
 readable in the terminal:
 
 ```bash
-uv run python src/plot_circuits.py --dir <dir with your intervention .pt files> --output plots --percentile 99
+uv run python src/analysis/plot_circuits.py --dir <dir with your intervention .pt files> --output plots --percentile 99
 ```
 
 ## The capture convention (which token we read)
@@ -437,7 +439,7 @@ An **intervention** run (step 7) saves a slightly different layout — `{"baseli
 "baseline_accuracy": float, "ablations": [{"layer_idx", "feature_idx", "type", "local_idx",
 "accuracy", "accuracy_drop"}, ...], "metadata": {...}}` — where each ablation records only the
 *scalar* accuracy and its drop versus baseline (the heavy per-ablation rows are discarded; the
-unablated `baseline` is kept once). `src/plot_ablations.py` reads these files and turns the drops
+unablated `baseline` is kept once). `src/analysis/plot_ablations.py` reads these files and turns the drops
 into heatmaps and cross-run scatter plots (step 7).
 
 ## Everything you need to fill in
@@ -458,7 +460,7 @@ grep -rn TODO src/
 | `src/inference.py` | `find_positions_of_interest` — extra prompt positions to record | optional (default: none) |
 | `src/utils/parser.py` | extra task-specific command-line arguments | optional |
 | `src/utils/dir.py` | `generate_output_path` — the output filename | optional (good default) |
-| `src/lasso.py` | `assign_condition`, `build_target` — what to compare/predict | optional (good defaults) |
+| `src/analysis/lasso.py` | `assign_condition`, `build_target` — what to compare/predict | optional (good defaults) |
 | `src/utils/scoring.py` | `is_correct` — whether a generated answer is right (scores ablation accuracy drops) | optional (good default) |
 
 Each `TODO` explains *what* to do, *why*, and shows a worked example in comments. Once your model is

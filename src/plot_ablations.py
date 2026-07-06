@@ -50,8 +50,9 @@ WHAT YOU CAN CHANGE / HOW TO EXTEND:
       infer_num_mlp(...)       -- where the head columns begin (the MLP|head split), read from the file.
       discover_settings/load_settings -- list + load every .pt in a --dir once.
       neuron_label(...)        -- a readable component tag, e.g. "L0MLP1" / "L2A2".
-  - The reusable figure helpers here (still task-agnostic):
-      _layer_color_map(layers) -- the shared per-layer colours used across every figure.
+  - The reusable figure helpers:
+      categorical_color_map(layers) -- the shared per-layer colours used across every figure (lives in
+                                  src/utils/plotting.py, shared with src/plot_circuits.py).
       _save_heatmap(matrix, …) -- render ANY [rows x cols] matrix as a 0-centered diverging heatmap
                                   (supports per-layer coloured ticks and layer-block dividers).
   - `make_layer_component_heatmap` / `make_setting_component_heatmap` are the heatmaps, built on those
@@ -75,10 +76,11 @@ import numpy as np  # noqa: E402
 import seaborn as sns  # noqa: E402
 from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatter legends)
 
-from utils.ablations import discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
+from utils.ablations import common_geometry, discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
+from utils.plotting import categorical_color_map, save_figure  # noqa: E402
 
 # Heatmaps are split by component TYPE (the "shape" distinction from the scatter) and use the SAME
-# per-layer colours (via _layer_color_map) on the layer axis, so the two figure families read alike.
+# per-layer colours (via categorical_color_map) on the layer axis, so the two figure families read alike.
 TYPE_NOUN = {"mlp": "MLP neuron", "head": "attention head"}
 
 
@@ -132,7 +134,7 @@ def make_layer_component_heatmap(
         out: Path to write the .png to.
     """
     matrix = _drop_matrix(ablations, layers, count, feat_type)
-    layer_color = _layer_color_map(layers)
+    layer_color = categorical_color_map(layers)
     noun = TYPE_NOUN[feat_type]
     _save_heatmap(
         matrix,
@@ -163,7 +165,7 @@ def make_setting_component_heatmap(
         out: Path to write the .png to.
     """
     matrix, settings = _flat_drop_matrix(ablations_by_setting, layers, count, feat_type)
-    layer_color = _layer_color_map(layers)
+    layer_color = categorical_color_map(layers)
     noun = TYPE_NOUN[feat_type]
     _save_heatmap(
         matrix,
@@ -248,25 +250,12 @@ def _save_heatmap(
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     ax.set_title(title)
-    fig.savefig(out, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  saved {out}")
+    save_figure(fig, out)
 
 
-# Point STYLE for the scatter: shape encodes the component type, colour (below) encodes its layer.
+# Point STYLE for the scatter: shape encodes the component type, colour (via categorical_color_map)
+# encodes its layer.
 TYPE_MARKER = {"mlp": "o", "head": "*"}  # MLP neuron = circle, attention head = star
-
-
-def _layer_color_map(layers: list[int]) -> dict[int, Any]:
-    """Give each layer its own colour: a categorical palette for a few layers, sampled if many."""
-    if len(layers) <= 10:
-        cmap = plt.get_cmap("tab10")  # 10 distinct, well-separated colours
-        return {layer: cmap(i) for i, layer in enumerate(layers)}
-    if len(layers) <= 20:
-        cmap = plt.get_cmap("tab20")
-        return {layer: cmap(i) for i, layer in enumerate(layers)}
-    cmap = plt.get_cmap("viridis")  # too many for a categorical palette -> sample a continuous one
-    return {layer: cmap(i / (len(layers) - 1)) for i, layer in enumerate(layers)}
 
 
 def make_scatter(
@@ -307,7 +296,7 @@ def make_scatter(
     b = {(r["layer_idx"], r["type"], r["local_idx"]): r for r in ablations_b}
     keys = sorted(set(a) | set(b))
     layers = sorted({key[0] for key in keys})
-    layer_color = _layer_color_map(layers)
+    layer_color = categorical_color_map(layers)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     for key in keys:
@@ -344,9 +333,7 @@ def make_scatter(
     ax.add_artist(ax.legend(handles=type_handles, title="component", loc="upper left", fontsize=8))
     ax.legend(handles=layer_handles, title="layer", loc="lower right", fontsize=8, ncol=max(1, len(layers) // 12))
 
-    fig.savefig(out, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"  saved {out}")
+    save_figure(fig, out)
 
 
 def make_scatter_matrix(ablations_by_setting: dict[str, list[dict[str, Any]]], out_dir: Path) -> None:
@@ -416,12 +403,7 @@ if __name__ == "__main__":
     # MLP neurons and one for heads. Use the union of layers and the largest MLP/head counts so runs
     # with different sizes still line up (absent cells stay grey), matching the scatter's 0-fill idea.
     if len(loaded) >= 2:
-        all_layers = sorted(
-            {layer for _, meta in loaded.values() for layer in (meta.get("layer_indices") or [])}
-            | {a["layer_idx"] for ablations in abl_by_setting.values() for a in ablations}
-        )
-        max_mlp = max((infer_num_mlp(ablations, meta) or 0) for ablations, meta in loaded.values())
-        max_heads = max(meta.get("num_attention_heads", 0) for _, meta in loaded.values())
+        all_layers, max_mlp, max_heads = common_geometry(loaded)
         if max_mlp:
             make_setting_component_heatmap(
                 abl_by_setting, all_layers, max_mlp, "mlp", out_dir / "heatmap_settings_mlp.png"

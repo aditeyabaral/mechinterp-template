@@ -88,6 +88,31 @@ def discover_settings(directory: Path) -> dict[str, Path]:
     return {path.stem: path for path in sorted(directory.glob("*.pt"))}
 
 
+def common_geometry(loaded: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]) -> tuple[list[int], int, int]:
+    """The shared node geometry across every loaded setting: (layers, num_mlp, num_heads).
+
+    Both plotting scripts lay every setting out on the SAME axes so a given neuron/head sits in the
+    same place in every figure. That needs one common geometry, so we take the UNION of the runs'
+    layers (a run missing a layer just leaves that column empty) and the LARGEST num_mlp / num_heads
+    seen (assumes the runs share a model, the normal case; mixing different-width models would
+    misplace the head columns).
+
+    Args:
+        loaded: {setting label: (summary, metadata)} from load_settings.
+
+    Returns:
+        (layers sorted ascending, num_mlp, num_heads). num_mlp is 0 if it can't be inferred from any
+        file (no saved num_mlp_neurons and no head ablated) -- the caller decides whether that's fatal.
+    """
+    layers = sorted(
+        {layer for _, meta in loaded.values() for layer in (meta.get("layer_indices") or [])}
+        | {a["layer_idx"] for ablations, _ in loaded.values() for a in ablations}
+    )
+    num_mlp = max((infer_num_mlp(ablations, meta) or 0) for ablations, meta in loaded.values())
+    num_heads = max(meta.get("num_attention_heads", 0) for _, meta in loaded.values())
+    return layers, num_mlp, num_heads
+
+
 def load_settings(settings: dict[str, Path]) -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
     """Load each setting's .pt once, keeping only the ones with usable ablations.
 

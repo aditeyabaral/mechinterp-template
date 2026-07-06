@@ -357,7 +357,9 @@ instead: one column of nodes per layer (all MLP neurons + attention heads), with
 the top-p percentile of accuracy drop ("survivors") coloured and connected to the survivors of the
 next layer. It writes `S + 1` images — one `circuit_<setting>.png` per setting plus a
 `circuit_combined.png` overlaying every setting's edges in its own colour — and rings the components
-that survive in *every* setting (the shared-circuit candidates):
+that survive in *every* setting (the shared-circuit candidates). It also prints each setting's
+survivors layer by layer, with their accuracy drops (highest first), so the same information is
+readable in the terminal:
 
 ```bash
 uv run python src/plot_circuits.py --dir <dir with your intervention .pt files> --output plots --percentile 99

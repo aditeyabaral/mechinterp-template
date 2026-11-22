@@ -12,9 +12,9 @@ MechInterpLens is a starting point for **mechanistic interpretability** ("mechin
 neuron is switched off: out of 512 neurons, only a handful matter.* **[Try it in Colab](https://colab.research.google.com/github/aditeyabaral/MechInterpLens/blob/main/examples/quickstart.ipynb)**:
 the whole workflow on that example, in a few minutes.
 
-**What you get:** 
+**What you get:**
 
-Train a tiny transformer on a task you design, then find the neurons and attention heads that drive it. 
+Train a tiny transformer on a task you design, then find the neurons and attention heads that drive it.
 
 - **Build the model:** a tokenizer, a dataset and a small GPT-2 trained on your task.
 - **Look inside it:** the activations of every neuron and head at each answer token, and sparse probes

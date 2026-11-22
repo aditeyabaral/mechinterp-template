@@ -17,7 +17,7 @@ results/
 plots/
 *.pt
 *.png
-!docs/*.png
+!examples/img/*.png
 
 # Logs (training runs, cluster jobs)
 wandb/

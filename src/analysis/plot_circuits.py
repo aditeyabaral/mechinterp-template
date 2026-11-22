@@ -16,11 +16,12 @@ same neuron sits at the same spot in every image and you can compare settings at
 
 WHAT "SURVIVING" MEANS: for each layer we take the accuracy_drop of every component that run ablated
 and keep only the ones in the top-p PERCENTILE (default 99; try 95 with --percentile if the surviving
-set is too sparse to see). accuracy_drop is baseline_accuracy - ablated_accuracy, so a survivor is a
-component the model leaned on heavily in that setting. EVERY neuron/head is drawn (all at the same
-size, so the whole population is visible); survivors are told apart by COLOUR (blue = MLP neuron,
-orange = attention head) against the grey non-survivors, which makes the SPARSITY of the circuit
-visible -- a few load-bearing components picked out against the full population.
+set is too sparse to see) whose drop is above 0. accuracy_drop is baseline_accuracy -
+ablated_accuracy, so a survivor is a component the model leaned on heavily in that setting. EVERY
+neuron/head is drawn (all at the same size, so the whole population is visible); survivors are told
+apart by COLOUR (blue = MLP neuron, orange = attention head) against the grey non-survivors, which
+makes the SPARSITY of the circuit visible -- a few load-bearing components picked out against the
+full population.
 
 WHAT THE EDGES MEAN: within a setting we connect every surviving component of one layer to every
 surviving component of the next (a complete bipartite link between adjacent survivor sets). The
@@ -28,7 +29,7 @@ reasoning is deliberately simple: our ablation experiment showed BOTH endpoints 
 for the correct answer in that setting, so we treat them as co-participating in one circuit. (This is
 a coarse "they both matter" edge, not a measured connection -- see HOW TO EXTEND to make it stronger.)
 
-THE FIGURES: S + 1 separate images --
+THE FIGURES: S + 1 separate images (S with a single setting) --
   * one image PER setting (circuit_<setting>.png), its edges drawn in black;
   * one COMBINED image (circuit_combined.png) overlaying every setting's edges at once, each setting
     in its OWN colour, so you can see where the settings route through the same components and where
@@ -46,10 +47,9 @@ Nothing here needs editing to run: the layer count, head count and MLP/head spli
 from each file's saved metadata (via the shared loaders in src/utils/ablations.py), and every .pt in
 --dir is used, labelled by its filename.
 
-WHAT YOU NEED FIRST: like src/analysis/plot_ablations.py, every ablation entry must carry an `accuracy_drop`
-(intervention mode records it via `is_correct` in src/main.py). If your prompts have no ground-truth
-"answer" the drops are all 0, the percentile filter keeps nothing, and the circuit is empty. See the
-src/analysis/plot_ablations.py module docstring for the exact fields and how to add accuracy scoring.
+WHAT YOU NEED FIRST: like src/analysis/plot_ablations.py, intervention .pt files from src/main.py
+--intervention, whose every ablation entry carries an `accuracy_drop` (so your prompts need a
+ground-truth "answer"). --metric picks another drop to rank by, as in plot_ablations.py.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
   - `compute_survivors` is the whole selection rule (top-p percentile of accuracy_drop per layer).
@@ -84,7 +84,7 @@ from matplotlib.path import Path as MplPath  # noqa: E402  (curved edges)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # The task-agnostic loaders live in utils/ablations.py, shared with src/analysis/plot_ablations.py;
 # the figure helpers live in utils/plotting.py (also shared).
-from utils.ablations import common_geometry, discover_settings, load_settings, neuron_label  # noqa: E402
+from utils.ablations import common_layout, discover_settings, load_settings, neuron_label  # noqa: E402
 from utils.plotting import categorical_color_map, save_figure  # noqa: E402
 
 # Node styling: EVERY neuron/head is drawn at the same size so the whole population is visible;
@@ -107,7 +107,7 @@ def compute_survivors(ablations: list[dict[str, Any]], layers: list[int], percen
             accuracy_drop).
         layers: The layers to build survivor sets for, in column order.
         percentile: Keep components with accuracy_drop >= this percentile of the layer's drops
-            (e.g. 99 keeps the top 1%). Try 95 if the surviving set is too sparse.
+            (e.g. 99 keeps the top 1%), and above 0. Try 95 if the surviving set is too sparse.
 
     Returns:
         {layer_idx: set of surviving feature indices}. Layers with no ablated components map to an
@@ -124,11 +124,13 @@ def compute_survivors(ablations: list[dict[str, Any]], layers: list[int], percen
             survivors[layer] = set()
             continue
         threshold = float(np.percentile(np.array(list(neuron_drops.values())), percentile))
-        survivors[layer] = {feat for feat, drop in neuron_drops.items() if drop >= threshold}
+        # A survivor must also cost something when removed (drop > 0): when most drops in a layer are exactly 0,
+        # the percentile itself is 0 and would otherwise keep every component of the layer.
+        survivors[layer] = {feat for feat, drop in neuron_drops.items() if drop >= threshold and drop > 0}
     return survivors
 
 
-def print_survivors(label: str, ablations: list[dict[str, Any]], survivors: dict[int, set[int]], num_mlp: int) -> None:
+def _print_survivors(label: str, ablations: list[dict[str, Any]], survivors: dict[int, set[int]], num_mlp: int) -> None:
     """Print one setting's surviving components and their accuracy drops (deltas), layer by layer.
 
     The same information the diagram encodes, but as text: for each layer it lists the survivors
@@ -164,7 +166,7 @@ def print_survivors(label: str, ablations: list[dict[str, Any]], survivors: dict
         print("    (none -- the percentile filter kept nothing; try a lower --percentile)")
 
 
-def compute_shared(survivors_per_setting: dict[str, dict[int, set[int]]], layers: list[int]) -> dict[int, set[int]]:
+def _compute_shared(survivors_per_setting: dict[str, dict[int, set[int]]], layers: list[int]) -> dict[int, set[int]]:
     """Per layer, the components that survive in EVERY setting -- the shared-circuit candidates.
 
     Args:
@@ -332,7 +334,7 @@ def draw_combined_panel(
         bow = (i - (n_settings - 1) / 2) * 0.35  # symmetric fan: each setting bows by a distinct amount/side
         _draw_arced_edges(ax, positions, _edges(survivors, layers), color=setting_colors[setting], bow=bow)
     _finish_axes(ax, layers, "All settings combined")
-    # The setting-colour legend is added (stacked with the node legend) by save_combined_figure.
+    # The setting-colour legend is added (stacked with the node legend) by _save_combined_figure.
 
 
 def _node_legend_handles() -> list[Line2D]:
@@ -354,7 +356,7 @@ def _node_legend_handles() -> list[Line2D]:
     ]
 
 
-def save_setting_figure(
+def _save_setting_figure(
     label: str,
     survivors: dict[int, set[int]],
     shared: dict[int, set[int]],
@@ -382,7 +384,7 @@ def save_setting_figure(
     save_figure(fig, out)
 
 
-def save_combined_figure(
+def _save_combined_figure(
     survivors_per_setting: dict[str, dict[int, set[int]]],
     shared: dict[int, set[int]],
     setting_colors: dict[str, Any],
@@ -426,7 +428,7 @@ def save_combined_figure(
     save_figure(fig, out)
 
 
-def make_circuit_figures(
+def _make_circuit_figures(
     survivors_per_setting: dict[str, dict[int, set[int]]],
     layers: list[int],
     num_mlp: int,
@@ -447,12 +449,12 @@ def make_circuit_figures(
     """
     # "Shared" only means something when there are >= 2 settings to intersect; with one setting every
     # survivor would trivially be "shared", so pass {} to ring nothing in that case.
-    shared = compute_shared(survivors_per_setting, layers) if len(survivors_per_setting) >= 2 else {}
+    shared = _compute_shared(survivors_per_setting, layers) if len(survivors_per_setting) >= 2 else {}
     setting_colors = categorical_color_map(list(survivors_per_setting))
     for label, survivors in survivors_per_setting.items():
-        save_setting_figure(label, survivors, shared, layers, num_mlp, num_heads, out_dir / f"circuit_{label}.png")
+        _save_setting_figure(label, survivors, shared, layers, num_mlp, num_heads, out_dir / f"circuit_{label}.png")
     if len(survivors_per_setting) >= 2:
-        save_combined_figure(
+        _save_combined_figure(
             survivors_per_setting, shared, setting_colors, layers, num_mlp, num_heads, out_dir / "circuit_combined.png"
         )
     else:
@@ -472,6 +474,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output", "-o", default="plots", help="Directory to write the figures into.")
     parser.add_argument(
+        "--metric",
+        default="accuracy_drop",
+        help="Which drop to plot: accuracy_drop (whole answer, the default), mean_step_accuracy_drop (averaged "
+        "over the answer steps) or step:<name> for one step, e.g. step:step0 (the answer's first token) or "
+        "step:eos (stopping).",
+    )
+    parser.add_argument(
         "--percentile",
         "-p",
         type=float,
@@ -484,9 +493,9 @@ if __name__ == "__main__":
 
     settings = discover_settings(Path(args.dir))  # {label: .pt path}, one per setting, labelled by filename
     if not settings:
-        raise SystemExit(f"No .pt files found in {args.dir}.")
+        raise SystemExit(f"No .pt files found in {args.dir}")
 
-    loaded = load_settings(settings)  # {label: (summary, metadata)}; skips non-intervention / empty files
+    loaded = load_settings(settings, args.metric)  # {label: (summary, metadata)}; skips non-intervention / empty files
     if not loaded:
         raise SystemExit(
             f"No usable intervention runs among {sorted(settings)} -- the .pt files may be incomplete or not "
@@ -496,9 +505,9 @@ if __name__ == "__main__":
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Common node geometry so the same neuron sits at the same spot in every panel (union of the runs'
-    # layers + the largest MLP/head counts); see common_geometry for the shared-model assumption.
-    layers, num_mlp, num_heads = common_geometry(loaded)
+    # Common node layout so the same neuron sits at the same spot in every panel (union of the runs'
+    # layers + the largest MLP/head counts); see common_layout for the shared-model assumption.
+    layers, num_mlp, num_heads = common_layout(loaded)
     if not num_mlp:
         raise SystemExit(
             "Can't tell where attention heads start (no num_mlp_neurons in metadata and no head was ablated) -- "
@@ -511,8 +520,8 @@ if __name__ == "__main__":
     # Print the surviving components (top percentile) and their accuracy drops per layer, so the same
     # information the diagram encodes is also readable in the terminal.
     for label, (ablations, _) in loaded.items():
-        print_survivors(label, ablations, survivors_per_setting[label], num_mlp)
+        _print_survivors(label, ablations, survivors_per_setting[label], num_mlp)
 
-    make_circuit_figures(survivors_per_setting, layers, num_mlp, num_heads, out_dir)
+    _make_circuit_figures(survivors_per_setting, layers, num_mlp, num_heads, out_dir)
 
     print(f"Done. Figures in {out_dir}/")

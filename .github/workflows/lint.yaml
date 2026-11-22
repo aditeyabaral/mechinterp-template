@@ -9,24 +9,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
             ref: ${{ github.head_ref }}
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
 
-      - name: Install Ruff
-        run: pip install -U ruff
+      - uses: astral-sh/setup-uv@v10.4.0
+
+      - name: Install tools from pyproject.toml and uv.lock
+        run: uv sync --frozen --only-group dev
 
       - name: Show ruff config
-        run: ruff check --show-settings
+        run: uv run --frozen --only-group dev ruff check --show-settings
 
       - name: Run Ruff Lint
-        run: |
-          ruff check . --output-format=github --config=pyproject.toml
+        run: uv run --frozen --only-group dev ruff check . --output-format=github --config=pyproject.toml
 
       - name: Run Ruff Format Check
-        run: |
-          ruff format . --check
+        run: uv run --frozen --only-group dev ruff format . --check

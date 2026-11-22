@@ -12,19 +12,25 @@ dependencies = [
     "matplotlib>=3.10.7",
     "networkx>=3.0",
     "protobuf>=6.33.1",
-    "scikit-learn>=1.7.2",
+    "joblib>=1.4.0",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.14.0",
     "seaborn>=0.13.2",
-    "torch>=2.6.0,<2.10",
-    "transformers>=4.57.1",
+    "torch>=2.6.0",
+    # <5.24: transformers 5.24.0 breaks TransformerLens' cached generation (every token after the first
+    # is wrong); main.py's teacher-forcing vs generation check flags it. Lift the cap once a fixed release is out.
+    "transformers>=5.12.0,<5.24",
     "wandb>=0.25.0",
     "rich>=14.3.3",
     "transformer-lens>=3.2.1",
 ]
 
-[project.optional-dependencies]
+# Dev tools, pinned so the pre-commit hook, CI and your editor all run the same ruff.
+# Installed by `uv sync` (uv installs the "dev" group by default).
+[dependency-groups]
 dev = [
-    "pre-commit>=4.4.0",
-    "ruff>=0.14.5",
+    "pre-commit==4.7.0",
+    "ruff==0.17.6",
 ]
 
 [tool.ruff.lint]
@@ -51,10 +57,12 @@ convention = "google"
 # makes ruff auto-detect it as first-party locally (while CI, lacking that dir, treats it
 # as third-party) -- causing I001 to pass locally but fail on CI.
 known-third-party = ["wandb"]
+# src/train/scoring.py, which train_model.py imports as a plain module from its own folder.
+known-first-party = ["scoring"]
 
 [tool.ruff]
 line-length = 120
-target-version = "py311"
+target-version = "py313"  # matches requires-python
 
 [tool.ruff.format]
 quote-style = "double"

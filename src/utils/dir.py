@@ -1,11 +1,13 @@
 """Build the output path/filename for saved inference results.
 
-`generate_output_path` has a sensible default (model name + #prompts), so the pipeline
-runs as-is. Customize it to encode more of your run's parameters into the filename so
-different runs don't overwrite each other. A small worked example is in comments.
+`generate_output_path` has a sensible default that encodes every generic run parameter
+(model, prompts, layers, capture and intervention settings, seed, ...), so runs that differ in
+any of them never overwrite each other. Add your own task-specific arguments to it (see the
+commented example) so those are covered too.
 """
 
 import argparse
+from pathlib import Path
 
 
 def generate_output_path(args: argparse.Namespace) -> str:
@@ -23,22 +25,29 @@ def generate_output_path(args: argparse.Namespace) -> str:
     if args.output is not None:
         return args.output
 
-    # ----------------------------------------------------------------------- #
-    # TODO: customize the filename to capture this run's parameters so that
-    # different runs don't overwrite each other. The default below uses just the
-    # model name and prompt count.
-    # ----------------------------------------------------------------------- #
-    #
-    # Example (a task with an extra --max-digits argument), encoding it into the filename:
-    #
-    #     components = [
-    #         f"[m={model_name}]",
-    #         f"[p={args.num_prompts}]",
-    #         f"[digits={args.max_digits}]",
-    #     ]
-    #     return "_".join(components) + ".pt"
-    #
-    # ----------------------------------------------------------------------- #
     model_name = str(args.model_path).replace("/", "--")
-    intervention = getattr(args, "intervention", None) is not None
-    return f"[m={model_name}]_[p={args.num_prompts}]_[int={intervention}].pt"
+    intervention = args.intervention
+    if intervention is not None and intervention != "all":
+        intervention = Path(intervention).stem  # e.g. "lasso_shortlist" for lasso_shortlist.json
+    components = [
+        f"[m={model_name}]",
+        f"[p={args.num_prompts}]",
+        f"[l={'-'.join(map(str, args.layers)) if args.layers else 'all'}]",
+        f"[mnt={args.max_new_tokens}]",
+        f"[acts={args.capture_activations}]",
+        f"[logits={args.capture_logits}]",
+        f"[int={intervention}]",
+        f"[seed={args.seed}]",
+    ]
+
+    # ----------------------------------------------------------------------- #
+    # TODO (optional): add your task-specific arguments to the filename, so runs
+    # that differ in them don't overwrite each other.
+    # ----------------------------------------------------------------------- #
+    #
+    # Example (a task with an extra --max-digits argument):
+    #
+    #     components.append(f"[digits={args.max_digits}]")
+    #
+    # ----------------------------------------------------------------------- #
+    return "_".join(components) + ".pt"

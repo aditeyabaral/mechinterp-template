@@ -131,10 +131,11 @@ definitions, just enough to follow along:
 
 - **Logits** — the raw scores over the whole vocabulary that get turned into next-token probabilities.
 
-- **Lasso** — a linear model with an "L1 penalty." Given many activations, it predicts a target and
-  drives almost all of its weights to exactly zero, leaving a **short list** of the activations that
-  actually matter. We use it to shortlist which neurons/heads are worth ablating. (You don't need the
-  math — just know it gives you a ranked shortlist.)
+- **Lasso** — a linear model with an "L1 penalty." Given many activations, it predicts a target (here
+  a class, such as the next answer token: a *probe*) and pushes most of its weights to exactly zero,
+  leaving a **short list** of the activations it relies on, ranked by weight. We use it to shortlist
+  which neurons/heads are worth ablating. (You don't need the math — just know it gives you a ranked
+  shortlist.)
 
 - **Grokking** — a striking training phenomenon where a small model first *memorises* its training
   data and then, often much later, *suddenly* starts to *generalise*. Watching the circuit form during
@@ -175,11 +176,12 @@ what it produces and hands to the next one:
    (build a tokenizer)      (make training data)    (train it)          (saved locally, or to the Hub)
                                                                                 │
                                                                                 ▼
-  PromptDataset  ──▶  main.py  ──▶  results file  ──▶  lasso.py  ──▶  analysis.json
+  PromptDataset  ──▶  main.py  ──▶  results file  ──▶  lasso.py  ──▶  lasso_shortlist.json
    (probe prompts)    (capture)     (activations)       (rank parts)    (what to ablate)
         │                                                                     │
         └──────────▶  main.py --intervention  ◀───────────────────────────────┘
-                      (switch the parts off, save baseline + ablated runs)
+                      (switch the parts off -- the shortlist, or `all` of them --
+                       save baseline + ablated runs)
                               │
                               ▼
                       plot_ablations.py  (visualise the drops: heatmaps + scatter)
@@ -189,7 +191,8 @@ Follow it like a snake: build the model along the top, drop down and run it on y
 **record what happens inside**, **shortlist** the neurons/heads that look important, then feed that
 shortlist back into `main.py` to **switch them off** and see how the answers change. The last two
 steps (`lasso.py` and `--intervention`) are optional — you can also stop after capturing and explore
-the saved activations yourself.
+the saved activations yourself. For a small model you can skip the shortlist too: `--intervention all`
+switches off every neuron and head, one at a time.
 
 ## Setup
 
@@ -198,15 +201,18 @@ This project uses [`uv`](https://docs.astral.sh/uv/) for dependency management.
 ```bash
 uv sync                       # create the virtual environment and install dependencies
 uv run python src/main.py -h  # check it works (prints the command-line options)
+uv run pre-commit install     # optional: lint and format your code on every commit
 ```
 
-(You can also call the environment directly, e.g. `.venv/bin/python src/main.py -h`.)
+(You can also call the environment directly, e.g. `.venv/bin/python src/main.py -h`.) `uv sync`
+also installs the pinned dev tools (`ruff`, `pre-commit`), so your editor, the pre-commit hook and
+CI all run the same `ruff` version.
 
 Training saves your tokenizer/dataset/model locally by default — no account needed. If you'd
 rather push them to the Hugging Face Hub (pass `--hub-name`), log in once:
 
 ```bash
-uv run huggingface-cli login
+uv run hf auth login
 ```
 
 ## Project structure
@@ -216,21 +222,22 @@ src/
   train/                 # build your toy model
     train_tokenizer.py   #   build a character-level tokenizer            [fill in vocab]
     create_dataset.py    #   generate a synthetic training dataset        [fill in build_dataset]
-    train_model.py       #   train a small GPT-2, saved locally by default [fill in repo names]
+    train_model.py       #   train a small GPT-2, saved locally by default [fill in names]
+    scoring.py           #   is_correct(): the answer's exact tokens, then <eos> (used everywhere)
   model.py               # load_model(): boots the model into a TransformerLens bridge (generic)
   utils/
     dataset.py           # PromptDataset: the probe prompts you run            [fill in — required]
     parser.py            # command-line arguments for main.py                  [optional extra args]
     dir.py               # builds the output filename                          [optional]
-    scoring.py           # is_correct(): whether a generated answer is right   [optional]
     ablations.py         # shared loaders for intervention .pt files (used by the plot scripts)
     plotting.py          # shared figure helpers (colour maps, save_figure) for the plot scripts
   inference.py           # the activation-capture loop — the heart of the analysis
   main.py                # ENTRY POINT: run capture (+ optional intervention) and save results
   analysis/              # OPTIONAL analysis + plotting scripts (run from the repo root)
-    lasso.py             #   rank neurons/heads by importance, write analysis.json
+    lasso.py             #   rank neurons/heads by importance, write lasso_shortlist.json
     plot_ablations.py    #   heatmaps + cross-run scatter of ablation accuracy drops
     plot_circuits.py     #   circuit diagrams of the surviving components per setting
+    split_half.py        #   did a sweep use enough prompts? (stability of its component ranking)
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
@@ -240,10 +247,10 @@ captured) and **`main.py`** (how a run is orchestrated). They are heavily commen
 
 > [!NOTE]
 > **Local by default.** `--hub-name` is optional for `train_tokenizer.py`, `create_dataset.py`, and
-> `train_model.py` — omit it and the output is saved locally (`./artifacts/tokenizer`,
+> `train_model.py` — the output is always saved locally (`./artifacts/tokenizer`,
 > `./artifacts/dataset`, `--output-dir` for the model, default `./saved_models`) with no Hugging
-> Face login needed. Pass `--hub-name <user>/...` to push to the Hub instead, and point `--model-path`
-> (step 5) at whichever location you used.
+> Face login needed. Pass `--hub-name <user>/...` to also push it to the Hub, and point `--model-path`
+> (step 5) at whichever location you want to use.
 
 ### 1. Build a tokenizer
 
@@ -255,15 +262,28 @@ choice is one token per character. Set `VOCAB_CHARS` (every character your task 
 uv run python src/train/train_tokenizer.py --hub-name <user>/my-tokenizer
 ```
 
+The script saves the tokenizer, loads it back exactly as training will, and checks it — every
+character is one token, text decodes back exactly, ids are unique and contiguous, and so on. It is
+pushed to the Hub only if every check passes. Add `--add-bos` to put a `<bos>` token at the start of
+every sequence (a fixed first position many models use as a "resting place" for attention); the
+rest of the pipeline follows the tokenizer, so training and analysis always agree on it.
+
 ### 2. Generate a dataset
 
 Implement `build_dataset` in `src/train/create_dataset.py` to produce a Hugging Face dataset with
-`prompt` and `answer` columns. The file documents a *leakage-safe* recipe (so your test examples
-never sneak into training).
+`prompt` and `answer` columns and two splits: `train` (learned from) and `validation` (scored during
+training to pick the best checkpoint, and later a source of held-out prompts for the analysis). The
+file documents a *leakage-safe* recipe, and before anything is saved, `check_dataset` verifies that
+no question appears in two splits (fill in `item_key` to say what "the same question" means for your
+task, e.g. the same two operands).
 
 ```bash
 uv run python src/train/create_dataset.py --hub-name <user>/my-dataset
 ```
+
+The dataset is always saved to `./artifacts/dataset`; `--hub-name` also pushes it. For big datasets,
+build the splits with `Dataset.from_generator` as the example does: the rows go to disk as they are
+generated instead of filling your memory.
 
 ### 3. Train the toy model
 
@@ -273,6 +293,25 @@ control the size with flags like `--num-hidden-layers`, `--num-attention-heads`,
 ```bash
 uv run python src/train/train_model.py --hub-name <user>/my-model --num-epochs 5
 ```
+
+What happens during training:
+
+- **The data.** Each row becomes one sequence, `prompt + answer + <eos>`. The loss counts only the
+  answer and `<eos>`, so the model learns to answer and to *stop*, and nothing else: the prompt's
+  tokens (random operands, mostly) would only add noise and side behaviours to the circuits you'll
+  study. The model's `config.json` records what it was trained on (the dataset, its config and the
+  tokenizer) and how (`training_args`: every option you passed), so anyone can reproduce it.
+- **Evaluation.** Every `--eval-steps` the model generates an answer for every row of the
+  validation split. An answer is right only if its tokens are exactly the answer's, followed by
+  `<eos>`. Fill in `eval_categories` for a per-category breakdown (e.g. carry vs no carry).
+- **The end.** The best checkpoint (by validation accuracy) is kept and saved. The final numbers
+  (`eval_results.json`) and the training curves (`trainer_state.json`) are saved with the model.
+- **Interrupted runs.** With `--hub-name`, the latest full checkpoint (weights *and* optimizer
+  state) is pushed to the repo's `last-checkpoint/` folder, so a run that dies (e.g. a lost Colab
+  machine) continues on any machine with `--resume-from-checkpoint hub` (or pass a local
+  `checkpoint-*` directory). The repo's root holds the *best* model, which is what
+  `--model-path <user>/my-model` loads. `--init-from DIR` starts from a model's weights with a fresh
+  optimizer instead, and `--max-steps N` stops after N steps.
 
 > [!NOTE]
 > **A note on grokking.** Training defaults to a strong weight decay (`--weight-decay 1.0`). Heavy
@@ -292,47 +331,87 @@ These prompts *are* your experiment — they decide what behaviour you get to st
 thing you must implement to run the analysis.** A self-contained example (single-digit addition) is
 included in comments — uncomment it to see the pipeline run end to end, then replace it.
 
+Each prompt carries a `metadata` dict with its ground truth; put the correct answer under `"answer"`
+(as the example does) — scoring and the ablation sweep compare the model's answer against it.
+
+> [!TIP]
+> **Trained your own model? Prefer questions it never trained on.** A model is easiest to study on
+> questions it has learned to *generalise* to, not ones it may have memorised. One way is to build
+> your prompts from your dataset's `validation` split (load it with `datasets.load_dataset`).
+
 ### 5. Capture activations
 
 ```bash
-uv run python src/main.py -m <user>/my-model --num-prompts 200 --capture-geometry
+uv run python src/main.py -m <user>/my-model --num-prompts 200 --capture-activations
 ```
 
-This runs your model on each prompt, records the activations at the answer, and saves a `.pt` file in
-the current directory (its name is generated automatically from the run's parameters; pass
-`--output DIR` to choose where it goes). Useful options (`python src/main.py -h` lists them all):
+This runs your model on each prompt, records the activations at every answer token, and saves a
+`.pt` file in the current directory (its name is generated automatically from every run parameter, so
+different runs never overwrite each other; pass `--output FILE.pt` to choose it yourself). It also
+prints the baseline accuracy. Useful options (`python src/main.py -h` lists them all):
 
 | Option | Meaning |
 | --- | --- |
 | `-m, --model-path` | model to load (your HF repo id, or a local path) — **required** |
 | `-p, --num-prompts` | how many prompts to run (default 1000) |
-| `-l, --layers` | which layer indices to record from (default: all) |
-| `--capture-geometry` | record the activations: residual stream, MLP neurons, heads, embeddings. **Without this flag only the answer token and its logits are saved — pass it for any real analysis (`lasso.py` needs it).** |
-| `--max-new-tokens` | how many tokens to generate per prompt (default 200) |
-| `--intervention FILE` | run an ablation sweep from an `analysis.json` (step 7) |
+| `-l, --layers` | which layer indices to record from, and to ablate with `--intervention all` (default: all) |
+| `--capture-activations` | record the activations: residual stream, MLP neurons, heads, embeddings. **Without this flag only the answer itself is saved — pass it for any real analysis (`lasso.py` needs it).** |
+| `--capture-logits` | also save the logits that predict each answer token and the `<eos>` after it (they are big, and can be rebuilt from the last layer's residual stream) |
+| `--max-new-tokens` | how many tokens to generate per prompt (default: the longest answer plus one for `<eos>`) |
+| `--intervention FILE` | run an ablation sweep from a `lasso_shortlist.json`, or `all` for every neuron and head (step 7) |
+| `--batch-size` | prompts per forward pass in the teacher-forced sweep (default 256) |
 
 ### 6. Find the important components *(optional)*
 
 ```bash
-uv run python src/analysis/lasso.py --dir . --output analysis.json
+uv run python src/analysis/lasso.py --dir . --output lasso_shortlist.json
 ```
 
-Reads the `.pt` files, fits the Lasso, and writes `analysis.json` — per layer and per condition, the
-shortlist of important neurons/heads, each with its Lasso **weight** (signed effect size), plus a
-top-level `conditions` block recording how many rows backed each condition. (See the `lasso.py`
-module docstring for the exact JSON layout.)
+Reads the `.pt` files and, at every captured position and layer, fits a **probe**: a sparse (L1)
+logistic regression that tries to predict a target (by default, the next answer token the model
+writes) from the activations, trained on 80% of the prompts and scored on the other 20%. The
+neurons/heads a probe relies on form the shortlist, written to `lasso_shortlist.json` with their
+**weights** and the probe's held-out accuracy; a probe that can't beat chance shortlists nothing.
+(See the `lasso.py` module docstring for the exact JSON layout.)
+
+> [!NOTE]
+> A probe shows where information can be **read**, which is not the same as what the model **uses**
+> — that's what step 7 tests. For a small model you can skip this step and ablate everything
+> (`--intervention all`).
 
 ### 7. Ablate them *(optional)*
 
 ```bash
-uv run python src/main.py -m <user>/my-model --num-prompts 200 --intervention analysis.json
+uv run python src/main.py -m <user>/my-model --num-prompts 200 --intervention lasso_shortlist.json
+uv run python src/main.py -m <user>/my-model --num-prompts 200 --intervention all   # every neuron and head
 ```
 
 Re-runs the prompts, switching off each important component in turn, and for each one records the
 **accuracy drop** it causes (`baseline_accuracy - ablated_accuracy`) into a single `.pt` file — the
-bigger the drop, the more the model relied on that component. Accuracy is scored by `is_correct` in
-`src/utils/scoring.py` (it compares the model's answer to the `"answer"` in each prompt's metadata;
-adjust it for your task). `src/analysis/plot_ablations.py` turns those drops into figures. Like `lasso.py`, it reads a
+bigger the drop, the more the model relied on that component. An answer is correct only if the model
+produces exactly the `"answer"` in the prompt's metadata, token for token, and then `<eos>` (a model
+that writes the right answer and keeps going has not done the task). This one rule, `is_correct` in
+`src/train/scoring.py`, is used everywhere: training picks its best checkpoint by it, and inference
+marks every generated answer with it.
+
+**How the sweep is scored (teacher forcing).** Generating every answer token by token, for every
+prompt, again for every component, is slow. So each ablated model is scored by
+*teacher forcing*: the prompt is fed together with its correct answer and `<eos>`, and a single
+forward pass shows whether the model's top prediction is right at every answer step. That gives
+exactly the same verdict as greedy generation (the model writes the right answer iff it predicts
+each next token right, given the right answer so far) — `main.py` checks this on the baseline and
+warns if the two ever disagree — and it is much faster: one forward pass per batch of prompts,
+instead of one per generated token per prompt. It also tells you **which step** an
+ablation breaks: each ablation records `step_accuracy_drop` per answer token (`step0`, `step1`, …)
+and for stopping (`eos`).
+
+To check you used enough prompts, run the **split-half check** on a sweep:
+`uv run python src/analysis/split_half.py <sweep .pt>`. It measures each component's drop on half the
+prompts and on the other half, and compares the two rankings. A value near 1 (for the "meaningful"
+components, whose drop is above `--meaningful-drop`, half a percentage point by default) means the
+ranking is stable; a low one means you need more `--num-prompts`.
+
+`src/analysis/plot_ablations.py` turns the drops into figures. Like `lasso.py`, it reads a
 whole **directory** of intervention runs — each `.pt` in it is one *setting* — and reads the layer
 count, head count and MLP size from the files themselves, so there is nothing else to pass:
 
@@ -354,29 +433,37 @@ So a single intervention file already gives you the two per-run heatmaps; to get
 capture-and-ablate under two conditions (say, two prompt distributions or two models) and drop both
 `.pt` files in the same directory.
 
-`src/analysis/plot_circuits.py` reads the same directory of intervention runs and draws a **circuit diagram**
-instead: one column of nodes per layer (all MLP neurons + attention heads), with the components in
-the top-p percentile of accuracy drop ("survivors") coloured and connected to the survivors of the
-next layer. It writes `S + 1` images — one `circuit_<setting>.png` per setting plus a
-`circuit_combined.png` overlaying every setting's edges in its own colour — and rings the components
-that survive in *every* setting (the shared-circuit candidates). It also prints each setting's
-survivors layer by layer, with their accuracy drops (highest first), so the same information is
-readable in the terminal:
+`src/analysis/plot_circuits.py` reads the same directory of intervention runs and draws a **circuit
+diagram** instead: one column of nodes per layer (all MLP neurons + attention heads), with the
+components in the top-p percentile of accuracy drop that also cost something when removed
+("survivors") coloured and connected to the survivors of the next layer. It writes one
+`circuit_<setting>.png` per setting and, with two or more settings, a `circuit_combined.png`
+overlaying every setting's edges in its own colour, with the components that survive in *every*
+setting (the shared-circuit candidates) ringed in red. It also prints each setting's survivors layer
+by layer, with their accuracy drops (highest first), so the same information is readable in the
+terminal:
 
 ```bash
 uv run python src/analysis/plot_circuits.py --dir <dir with your intervention .pt files> --output plots --percentile 99
 ```
 
+Both plot scripts take `--metric` to choose which drop they show: `accuracy_drop` (the whole answer,
+the default), `mean_step_accuracy_drop` (averaged over the answer steps), or one step, e.g.
+`step:step0` (the answer's first token) or `step:eos` (whether the model still stops).
+
 ## The capture convention (which token we read)
 
 A model generates an answer as a sequence of tokens, and a prompt has many token positions. Where do
-we read activations? **Always at the last token of the answer.**
+we read activations? **At every token of the answer** (plus any prompt positions you name in
+`find_positions_of_interest`).
 
-If the model answers `42` and that is two tokens `['4', '2']`, we read at `'2'`. If it answers `-63`
-as `['-', '6', '3']`, we read at `'3'`. The intuition: by the answer's last token the model has
-committed to its answer, so that position's residual stream is the most informative single place to
-look. Every recorded tensor (residual, MLP neurons, attention heads, and the token / positional
-embeddings) is read at this *same* position, so they all describe the same token.
+If the model answers `42` and that is two tokens `['4', '2']`, the run records activations at both,
+named by the order they were written: `answer_0` (the `'4'`) and `answer_1` (the `'2'`). Each is
+stored under `result["activations"][name]`, and `result["positions"][name]` gives its token index.
+The answer's **last** token gets a shortcut too, `result["answer"]`: by then the model has committed
+to its answer, so it is often the most informative single place to look. Every tensor recorded at a
+position (residual, MLP neurons, attention heads, and the token / positional embeddings) is read at
+that *same* position, so they all describe the same token.
 
 > [!NOTE]
 > How this works under the hood: after generating, we run the *whole* output sequence (prompt +
@@ -384,12 +471,14 @@ embeddings) is read at this *same* position, so they all describe the same token
 > pass covers every position, the answer's last token always has its activations computed — there's no
 > "ran out of tokens" edge case to worry about, whatever `--max-new-tokens` you choose.
 
-Which substring counts as "the answer" is decided by `find_answer_span` in `src/inference.py`. The
-default grabs the first whitespace-delimited chunk of the generation; override it for your task.
+Which substring counts as "the answer" is decided by `find_answer_span` in `src/inference.py`. It
+only ever sees what the model wrote *before* its first special token: a trained model ends its answer
+with `<eos>`, and that `<eos>` is never part of the answer. The default grabs the first
+whitespace-delimited chunk of that text; override it for your task.
 
 ## What gets saved (and how to look at it)
 
-A run **with `--capture-geometry`** saves a dictionary like this (tensors are PyTorch tensors on the
+A run **with `--capture-activations`** saves a dictionary like this (tensors are PyTorch tensors on the
 CPU). The shapes shown are GPT-2's; a toy model you trained will have whatever sizes you configured
 (e.g. a `[256]` residual instead of `[768]`):
 
@@ -401,19 +490,28 @@ CPU). The shapes shown are GPT-2's; a toy model you trained will have whatever s
       "prompt_length": 4,           # number of prompt tokens
       "metadata": { ... },           # that prompt's ground truth, from PromptDataset
       "result": {
-        "completion": "12",          # what the model generated
+        "text": "7+5=12<eos>",       # prompt + generation, decoded (special tokens included)
+        "completion": "12<eos>",     # just the generation
+        "output_ids": Tensor[7],     # prompt + generated token ids
+        "correct": True,             # exactly the answer's tokens, then <eos> (None without an "answer")
+        "positions": {"answer_0": 4, "answer_1": 5},   # token index of each captured position
+        "activations": {             # activations at every captured position
+          "answer_0": {-1: {...}, 0: {"residual": Tensor[768], "mlp": Tensor[3072], "heads": Tensor[12, 64]}, ...},
+          ...                        # -1 = before block 0 (embeddings); find_positions_of_interest's names too
+        },
+        "logits": {"answer_0": ..., "answer_1": ..., "eos": ...},   # with --capture-logits only
         "answer": {
-          "token": "12",             # the answer (string)
+          "token": "12",             # the answer (string), without the <eos> after it
+          "token_id": Tensor[2],     # its token ids
           "position": 5,             # absolute index of its LAST token
           "residual":        {0: Tensor[768],  1: ...},   # per layer
           "mlp_neurons":     {0: Tensor[3072], 1: ...},   # per layer (the neurons)
           "attn_heads":      {0: Tensor[12, 64], ...},    # per layer (per head)
           "token_embedding": Tensor[768],   # content embedding at the answer token
-          "pos_embedding":   Tensor[768],   # positional embedding at the answer token
+          "pos_embedding":   Tensor[768],   # positional embedding (None for rotary models, e.g. Llama)
           "resid_pre":       Tensor[768],   # block 0's input (token + positional embedding)
-          "logits":          Tensor[50257],   # next-token distribution at the answer
+          "logits":          Tensor[50257],   # what predicted the last answer token (--capture-logits)
         },
-        "geometry": { ... },          # extra positions from find_positions_of_interest
       },
     },
     ...
@@ -426,20 +524,27 @@ To explore it in a notebook:
 
 ```python
 import torch
-data = torch.load("your_results.pt", weights_only=False)   # the .pt file main.py wrote
+
+data = torch.load("your_results.pt", weights_only=False)  # the .pt file main.py wrote
 row = data["baseline"][0]
 print(row["prompt"], "->", row["result"]["answer"]["token"])
 answer = row["result"]["answer"]
-layer = data["metadata"]["layer_indices"][0]                # a layer you actually captured
-neurons = answer["mlp_neurons"][layer]                      # MLP neurons at the answer token
-print(neurons.shape)                                        # e.g. torch.Size([3072]) for GPT-2
+layer = data["metadata"]["layer_indices"][0]  # a layer you actually captured
+neurons = answer["mlp_neurons"][layer]  # MLP neurons at the answer token
+print(neurons.shape)  # e.g. torch.Size([3072]) for GPT-2
 ```
 
 An **intervention** run (step 7) saves a slightly different layout — `{"baseline": [rows],
 "baseline_accuracy": float, "ablations": [{"layer_idx", "feature_idx", "type", "local_idx",
-"accuracy", "accuracy_drop"}, ...], "metadata": {...}}` — where each ablation records only the
-*scalar* accuracy and its drop versus baseline (the heavy per-ablation rows are discarded; the
-unablated `baseline` is kept once). `src/analysis/plot_ablations.py` reads these files and turns the drops
+"accuracy", "accuracy_drop", ...}, ...], "metadata": {...}}` — where each ablation records only its
+accuracy and its drop versus baseline (the heavy per-ablation rows are discarded; the unablated
+`baseline` is kept once). Each ablation also records `step_accuracy` and
+`step_accuracy_drop`, plus `correct`: a small `[prompts × steps]`
+matrix of which answer steps were right, so you can later split the drops by any property of the
+prompts (say, carry vs no carry) without re-running anything. The file also keeps
+`baseline_step_accuracy` and `baseline_correct`, and in `metadata` the `step_names` and
+`tf_generation_mismatches` (how many baseline prompts teacher forcing and generation disagreed on —
+it should be 0). `src/analysis/plot_ablations.py` reads these files and turns the drops
 into heatmaps and cross-run scatter plots (step 7).
 
 ## Everything you need to fill in
@@ -453,15 +558,14 @@ grep -rn TODO src/
 | File | What to implement | When |
 | --- | --- | --- |
 | `src/train/train_tokenizer.py` | `VOCAB_CHARS`, `SAMPLE_TEXTS` | building the model |
-| `src/train/create_dataset.py` | `build_dataset` — your training data | building the model |
-| `src/train/train_model.py` | `TOKENIZER_NAME`, `DATASET_NAME` | building the model |
+| `src/train/create_dataset.py` | `build_dataset` — your training data; `item_key` for the leakage check (optional) | building the model |
+| `src/train/train_model.py` | `TOKENIZER_NAME`, `DATASET_NAME`; `eval_categories` for per-category accuracy (optional) | building the model |
 | `src/utils/dataset.py` | `PromptDataset.generate_prompts` — the probe prompts | **required to analyse** |
 | `src/inference.py` | `find_answer_span` — which substring is "the answer" | optional (good default) |
-| `src/inference.py` | `find_positions_of_interest` — extra prompt positions to record | optional (default: none) |
+| `src/inference.py` | `find_positions_of_interest` — extra prompt positions to record (gets each prompt's metadata) | optional (default: none) |
 | `src/utils/parser.py` | extra task-specific command-line arguments | optional |
 | `src/utils/dir.py` | `generate_output_path` — the output filename | optional (good default) |
-| `src/analysis/lasso.py` | `assign_condition`, `build_target` — what to compare/predict | optional (good defaults) |
-| `src/utils/scoring.py` | `is_correct` — whether a generated answer is right (scores ablation accuracy drops) | optional (good default) |
+| `src/analysis/lasso.py` | `keep_row`, `assign_condition`, `build_target` — which rows, what to compare/predict | optional (good defaults) |
 
 Each `TODO` explains *what* to do, *why*, and shows a worked example in comments. Once your model is
 trained, the analysis side **runs as soon as you implement `PromptDataset.generate_prompts`** — every
@@ -469,13 +573,17 @@ other extension point has a working default.
 
 ## Tips and common pitfalls
 
-- **Always pass `--capture-geometry` for analysis.** Without it, *no* activations are recorded — you
-  only get the generated answer and its logits. (That lightweight mode exists to make large ablation
-  sweeps fast, where you only care about how the answer changes.)
+- **Always pass `--capture-activations` for analysis.** Without it, *no* activations are recorded — you
+  only get the generated answers and the accuracy, which is all an ablation sweep needs.
 - **Keep answers short** (one or two tokens). Long, variable answers make "the answer position" fuzzy
   and the analysis noisier.
 - **Start with a tiny model.** Fewer layers and heads means fewer things to understand.
 - **Reproducibility is built in:** `main.py` seeds all RNGs from `--seed`, so reruns are identical.
+- **Prompts are tokenized exactly as in training.** TransformerLens normally puts a BOS token in front
+  of every prompt, even for models that never saw one, which shifts every position and can change the
+  answers. `load_model` (`src/model.py`) instead adds a BOS only if your tokenizer does. So when you
+  count token positions (e.g. in `find_positions_of_interest`), count them as
+  `model.to_str_tokens(prompt)` shows them.
 - **GPU vs CPU:** the model is placed automatically; everything also runs on CPU, just slower.
 
 ## Shortcut: analysing a pretrained model
@@ -484,11 +592,15 @@ You don't *have* to train your own model. To skip steps 1–3 and study an exist
 checkpoint instead, point `--model-path` at any HF repo id or local path:
 
 ```bash
-uv run python src/main.py -m gpt2 --num-prompts 200 --capture-geometry
+uv run python src/main.py -m gpt2 --num-prompts 200 --capture-activations
 ```
 
-The rest of the analysis (steps 4–7) is identical. (Training your own model is recommended for
-learning, because you control and understand the task completely.)
+Capturing activations (steps 4–5) works the same. Anything scored for correctness does not: an
+answer only counts if the model ends it with `<eos>`, and GPT-2 was never trained to (in a few-shot
+prompt it ends answers with a newline, copying the examples). So every GPT-2 answer is scored wrong:
+the lasso's default `keep_row` keeps no rows, and the ablation sweep (step 7) has no accuracy to
+drop. For steps 6–7, train your own model, which is recommended for learning anyway, because you
+control and understand the task completely.
 
 ## Using a non-GPT-2 model
 
@@ -499,7 +611,9 @@ There is **no architecture-specific code to edit**. The model is loaded through
 `blocks.{i}.attn.hook_z`, `hook_embed`). The capture loop and ablation code in `src/inference.py`
 reference only those names, so switching models is just a matter of pointing `--model-path` at a
 different Hub repo or local directory — the bridge reads the new model's config and `cfg.n_layers /
-n_heads / d_head` update automatically.
+n_heads / d_head` update automatically. Models without a learned positional embedding (e.g. Llama,
+whose rotary embedding acts inside attention) simply store `pos_embedding` as `None`. Only training
+(`src/train/train_model.py`) is GPT-2-specific: it builds a GPT-2 from scratch.
 
 ## Further reading
 

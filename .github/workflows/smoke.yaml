@@ -1,0 +1,57 @@
+name: Smoke Test
+
+# Fills in the template's example task (single-digit addition) and runs the whole workflow on CPU with
+# a tiny model, so a change or a dependency update that breaks any step fails here.
+
+on:
+  pull_request:
+    types: [ opened, reopened, synchronize ]
+  push:
+    branches: [ main ]
+
+defaults:
+  run:
+    shell: bash  # -eo pipefail: any failing command fails the step
+
+jobs:
+  smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.4.0
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Fill in the example task
+        run: uv run --frozen python scripts/fill_example.py .
+
+      - name: Build the tokenizer and dataset, and train a tiny model
+        run: |
+          uv run --frozen python src/train/train_tokenizer.py
+          uv run --frozen python src/train/create_dataset.py --train-size 20000 --val-size 500
+          uv run --frozen python src/train/train_model.py --num-hidden-layers 2 --num-attention-heads 2 \
+            --hidden-size 64 --max-steps 1500 --eval-steps 500 --save-steps 500 --output-dir saved_models
+
+      - name: Capture activations and fit the lasso probes
+        run: |
+          uv run --frozen python src/main.py -m saved_models -p 200 --capture-activations -out captures/run.pt
+          uv run --frozen python src/analysis/lasso.py --dir captures --output lasso_shortlist.json
+
+      - name: Ablation sweeps (zero and mean), checking teacher forcing against generation
+        run: |
+          for ablation in zero mean; do
+            uv run --frozen python src/main.py -m saved_models -p 200 --intervention all \
+              --ablation-type "$ablation" -out "sweeps/$ablation.pt" | tee "sweep_$ablation.log"
+            grep -q "Teacher-forced vs generated baseline: 0 of" "sweep_$ablation.log"
+          done
+
+      - name: Analysis scripts
+        run: |
+          uv run --frozen python src/analysis/split_half.py sweeps/mean.pt
+          uv run --frozen python src/analysis/plot_ablations.py --dir sweeps --output plots
+          uv run --frozen python src/analysis/plot_circuits.py --dir sweeps --output plots

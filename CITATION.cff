@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use MechInterpLens in your work, please cite it as below."
+title: "MechInterpLens: a starter template for mechanistic interpretability on small transformers"
+abstract: "A starter template for mechanistic interpretability on small transformers: train a toy model on a task you design, then find the neurons and attention heads that drive it."
+type: software
+authors:
+  - family-names: Baral
+    given-names: Aditeya
+repository-code: "https://github.com/aditeyabaral/MechInterpLens"
+license: MIT
+version: 0.1.0
+keywords:
+  - mechanistic interpretability
+  - interpretability
+  - transformerlens
+  - transformers
+  - gpt-2
+  - pytorch

@@ -264,6 +264,7 @@ def _finish_axes(ax: plt.Axes, layers: list[int], title: str) -> None:
     """Label the layer columns, drop the y-axis clutter and title the panel."""
     ax.set_title(title)
     ax.set_frame_on(False)
+    ax.grid(False)  # the seaborn theme's gridlines would otherwise cut across the node columns
     # Pin the x-range to exactly the layer columns (plus a little padding). Without this, the arced
     # edges' control points would drag the autoscale outward and squash the columns into a thin central
     # strip; fixing xlim keeps the layers evenly spread across the (landscape) width.

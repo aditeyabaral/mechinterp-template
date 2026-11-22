@@ -226,18 +226,23 @@ def _locate_answer(
 def build_ablation_hooks(
     mlp_ablation: dict[int, list[int]] | None,
     head_ablation: dict[int, list[int]] | None,
+    means: dict[str, dict[int, torch.Tensor]] | None = None,
 ) -> list[tuple[str, Any]]:
-    """Build the TransformerLens forward-hook list that zeroes out the requested neurons/heads.
+    """Build the TransformerLens forward-hook list that knocks out the requested neurons/heads.
 
     Each entry is a (hook_name, fn) pair. TransformerLens calls fn(activation, hook) during the
-    forward pass and uses fn's return value in place of the original activation, so setting some
-    entries to 0 ABLATES (knocks out) those components -- the core causal test of mechinterp.
+    forward pass and uses fn's return value in place of the original activation, so overwriting some
+    entries ABLATES (knocks out) those components -- the core causal test of mechinterp. By default
+    they are set to 0; with `means` (from mean_activations) they are set to their average value
+    instead, a gentler knock-out that removes what the component says about THIS prompt while keeping
+    its typical level.
 
     Args:
-        mlp_ablation: Optional dict {layer_idx: [neuron indices]} of MLP neurons to zero, applied
+        mlp_ablation: Optional dict {layer_idx: [neuron indices]} of MLP neurons to ablate, applied
             to blocks.{layer}.mlp.hook_post (shape [batch, pos, d_mlp]).
-        head_ablation: Optional dict {layer_idx: [head indices]} of attention heads to zero,
+        head_ablation: Optional dict {layer_idx: [head indices]} of attention heads to ablate,
             applied to blocks.{layer}.attn.hook_z (shape [batch, pos, n_heads, d_head]).
+        means: None for zero ablation, or mean_activations' output for mean ablation.
 
     Returns:
         A list of (hook_name, hook_fn) pairs suitable for model.run_with_hooks / model.hooks.
@@ -247,19 +252,28 @@ def build_ablation_hooks(
 
     if mlp_ablation:
         for layer_idx, neuron_indices in mlp_ablation.items():
-            # idxs bound as a default arg so each layer's closure keeps its own indices
-            # (the classic Python late-binding gotcha).
-            def mlp_hook(act: torch.Tensor, hook: HookPoint, idxs: list[int] = list(neuron_indices)) -> torch.Tensor:
-                act[..., idxs] = 0.0  # zero these neurons at every position
+            idxs = list(neuron_indices)
+            value = 0.0 if means is None else means["mlp"][layer_idx][idxs]  # [len(idxs)]
+
+            # idxs and value bound as default args so each layer's closure keeps its own (the classic
+            # Python late-binding gotcha).
+            def mlp_hook(
+                act: torch.Tensor, hook: HookPoint, idxs: list[int] = idxs, value: float | torch.Tensor = value
+            ) -> torch.Tensor:
+                act[..., idxs] = value  # overwrite these neurons at every position
                 return act
 
             hooks.append((f"blocks.{layer_idx}.mlp.hook_post", mlp_hook))
 
     if head_ablation:
         for layer_idx, head_indices in head_ablation.items():
+            idxs = list(head_indices)
+            value = 0.0 if means is None else means["heads"][layer_idx][idxs]  # [len(idxs), d_head]
 
-            def head_hook(act: torch.Tensor, hook: HookPoint, idxs: list[int] = list(head_indices)) -> torch.Tensor:
-                act[:, :, idxs, :] = 0.0  # zero these heads' outputs at every position
+            def head_hook(
+                act: torch.Tensor, hook: HookPoint, idxs: list[int] = idxs, value: float | torch.Tensor = value
+            ) -> torch.Tensor:
+                act[:, :, idxs, :] = value  # overwrite these heads' outputs at every position
                 return act
 
             hooks.append((f"blocks.{layer_idx}.attn.hook_z", head_hook))
@@ -375,6 +389,7 @@ def _run_single_prompt(
     head_ablation: dict[int, list[int]] | None = None,
     capture_activations: bool = True,
     capture_logits: bool = False,
+    means: dict[str, dict[int, torch.Tensor]] | None = None,
 ) -> dict[str, Any]:
     """Run a single prompt through the model, capturing activations at the answer and named positions.
 
@@ -401,6 +416,7 @@ def _run_single_prompt(
         capture_logits: If True, store the logits that predict each answer token and the <eos>
             after it. They are often most of a file's size, and they can be rebuilt from the last
             layer's residual stream: model.unembed(model.ln_final(resid)).
+        means: None to ablate by zeroing, or mean_activations' output to ablate by the mean.
 
     Returns:
         Dict with keys: text, completion, output_ids (None when capture_activations=False), correct
@@ -414,7 +430,7 @@ def _run_single_prompt(
         maps "answer_0", ..., and "eos" to the logits that predicted that token, i.e. those computed
         one position earlier.
     """
-    ablation_hooks = build_ablation_hooks(mlp_ablation, head_ablation)
+    ablation_hooks = build_ablation_hooks(mlp_ablation, head_ablation, means)
     prompt_tokens = model.to_tokens(prompt)  # [1, prompt_length], tokenized as in training
 
     # 1. Generate with ablation applied. Greedy decoding (do_sample=False) so runs are
@@ -531,6 +547,7 @@ def run(
     head_ablation: dict[int, list[int]] | None = None,
     capture_activations: bool = True,
     capture_logits: bool = False,
+    means: dict[str, dict[int, torch.Tensor]] | None = None,
 ) -> list[dict[str, Any]]:
     """Run inference over a dataset, capturing MLP-neuron, per-head, residual, and embedding activations.
 
@@ -546,6 +563,7 @@ def run(
             find_positions_of_interest positions. False stores only the generated answers (much smaller).
         capture_logits: If True, also store the logits that predict each answer token and the
             <eos> after it (see _run_single_prompt).
+        means: None to ablate by zeroing, or mean_activations' output to ablate by the mean.
 
     Returns:
         List of result dicts, one per prompt (in dataset order), each with keys "prompt",
@@ -571,6 +589,7 @@ def run(
             head_ablation=head_ablation,
             capture_activations=capture_activations,
             capture_logits=capture_logits,
+            means=means,
         )
 
         results.append(
@@ -671,6 +690,7 @@ def score_teacher_forced(
     n_columns: int,
     mlp_ablation: dict[int, list[int]] | None = None,
     head_ablation: dict[int, list[int]] | None = None,
+    means: dict[str, dict[int, torch.Tensor]] | None = None,
 ) -> torch.Tensor:
     """Whether the model's top token is right at every answer step, with optional ablation, in one pass per batch.
 
@@ -681,13 +701,14 @@ def score_teacher_forced(
         n_columns: Number of step columns (len of the names build_teacher_forced_batches returned).
         mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero out (as in build_ablation_hooks).
         head_ablation: Optional dict {layer_idx: [head indices]} to zero out.
+        means: None to ablate by zeroing, or mean_activations' output to ablate by the mean.
 
     Returns:
         uint8 tensor [n_prompts, n_columns]: 1 if that step's top token is right, 0 if not,
         NOT_APPLICABLE if the prompt has no such step.
     """
     correct = torch.full((n_prompts, n_columns), NOT_APPLICABLE, dtype=torch.uint8)
-    with model.hooks(fwd_hooks=build_ablation_hooks(mlp_ablation, head_ablation)):
+    with model.hooks(fwd_hooks=build_ablation_hooks(mlp_ablation, head_ablation, means)):
         for batch in batches:
             tokens, start, columns = batch["tokens"], batch["prompt_length"], batch["columns"]
             n_steps = len(columns)
@@ -698,6 +719,34 @@ def score_teacher_forced(
             right = (predicted == tokens[:, start : start + n_steps]).to(torch.uint8).cpu()
             correct[batch["indices"][:, None], torch.tensor(columns)[None, :]] = right
     return correct
+
+
+@torch.inference_mode()
+def mean_activations(
+    model: TransformerBridge, batches: list[dict[str, Any]], layers: list[int]
+) -> dict[str, dict[int, torch.Tensor]]:
+    """Each MLP neuron's and attention head's average output, for mean ablation (--ablation-type mean).
+
+    The average is over every token of every sequence in `batches` (from build_teacher_forced_batches:
+    each prompt with its correct answer and <eos>), computed in one unablated pass.
+
+    Returns:
+        {"mlp": {layer: Tensor[d_mlp]}, "heads": {layer: Tensor[n_heads, d_head]}}, on the model's device.
+    """
+    names = {f"blocks.{layer}.mlp.hook_post": ("mlp", layer) for layer in layers}
+    names |= {f"blocks.{layer}.attn.hook_z": ("heads", layer) for layer in layers}
+    sums: dict[str, torch.Tensor] = {}
+    n_tokens = 0
+    for batch in batches:
+        _, cache = model.run_with_cache(batch["tokens"], names_filter=list(names))
+        for name in names:
+            total = cache[name].sum(dim=(0, 1))  # summed over batch and position
+            sums[name] = sums[name] + total if name in sums else total
+        n_tokens += batch["tokens"].numel()
+    means: dict[str, dict[int, torch.Tensor]] = {"mlp": {}, "heads": {}}
+    for name, (kind, layer) in names.items():
+        means[kind][layer] = sums[name] / n_tokens
+    return means
 
 
 def whole_answer_correct(correct: torch.Tensor) -> torch.Tensor:

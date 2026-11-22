@@ -87,6 +87,13 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "one at a time. When provided, an ablation sweep is run after the baseline.",
     )
     parser.add_argument(
+        "--ablation-type",
+        choices=["zero", "mean"],
+        default="zero",
+        help="How the sweep switches a component off: 'zero' (default) sets it to 0; 'mean' sets it to its average "
+        "over every prompt-and-answer token.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=256,

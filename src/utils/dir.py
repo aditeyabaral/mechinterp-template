@@ -39,6 +39,8 @@ def generate_output_path(args: argparse.Namespace) -> str:
         f"[int={intervention}]",
         f"[seed={args.seed}]",
     ]
+    if args.intervention is not None:
+        components.append(f"[abl={args.ablation_type}]")
 
     # ----------------------------------------------------------------------- #
     # TODO (optional): add your task-specific arguments to the filename, so runs

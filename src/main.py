@@ -178,6 +178,11 @@ if __name__ == "__main__":
             )
         baseline_accuracy = inference.accuracy(baseline_whole)
         baseline_step_accuracy = inference.step_accuracy(baseline_correct, names)
+        # --ablation-type mean: each component's average output over every token of these sequences,
+        # computed once on the unablated model; ablating then sets a component to this instead of 0.
+        means = None
+        if args.ablation_type == "mean":
+            means = inference.mean_activations(model, batches, [int(layer) for layer in analysis["layers"]])
         run_metadata.update(
             {"step_names": names, "tf_generation_mismatches": mismatches, "batch_size": args.batch_size}
         )
@@ -209,7 +214,7 @@ if __name__ == "__main__":
                     ],
                 }
                 correct = inference.score_teacher_forced(
-                    model, batches, len(dataset), len(names), mlp_ablation=mlp_abl, head_ablation=head_abl
+                    model, batches, len(dataset), len(names), mlp_ablation=mlp_abl, head_ablation=head_abl, means=means
                 )
                 ablated_accuracy = inference.accuracy(inference.whole_answer_correct(correct))
                 step_accuracy = inference.step_accuracy(correct, names)
@@ -233,6 +238,7 @@ if __name__ == "__main__":
         run_metadata.update(
             {
                 "intervention": args.intervention,
+                "ablation_type": args.ablation_type,
                 "baseline_generation_accuracy": inference.accuracy(torch.tensor(generated)),
             }
         )

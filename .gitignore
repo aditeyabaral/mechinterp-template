@@ -1,20 +1,27 @@
+# Python and tooling
+.venv/
+__pycache__/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Editors and local settings
 .idea/
 .vscode/
-__pycache__/
-.venv/
-logs/
-retry_missing*.slurm
-*.png
-*.pt
-.ruff_cache/
+.claude/
+.env
+
+# Outputs of the pipeline: tokenizer/dataset, models, results, figures
+artifacts/
+saved_models/
 results/
 plots/
-saved_models/
+*.pt
+*.png
+!docs/*.png
+
+# Logs (training runs, cluster jobs)
 wandb/
-*.out
+logs/
 *.log
+*.out
 *.err
-analysis_results*/
-.claude/
-artifacts/
-.env

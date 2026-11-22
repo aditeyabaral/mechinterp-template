@@ -51,6 +51,8 @@ convention = "google"
 # makes ruff auto-detect it as first-party locally (while CI, lacking that dir, treats it
 # as third-party) -- causing I001 to pass locally but fail on CI.
 known-third-party = ["wandb"]
+# src/train/scoring.py, which train_model.py imports as a plain module from its own folder.
+known-first-party = ["scoring"]
 
 [tool.ruff]
 line-length = 120

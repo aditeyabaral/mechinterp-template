@@ -106,11 +106,11 @@ def discover_settings(directory: Path) -> dict[str, Path]:
     return {path.stem: path for path in sorted(directory.glob("*.pt"))}
 
 
-def common_geometry(loaded: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]) -> tuple[list[int], int, int]:
-    """The shared node geometry across every loaded setting: (layers, num_mlp, num_heads).
+def common_layout(loaded: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]) -> tuple[list[int], int, int]:
+    """The shared node layout across every loaded setting: (layers, num_mlp, num_heads).
 
     Both plotting scripts lay every setting out on the SAME axes so a given neuron/head sits in the
-    same place in every figure. That needs one common geometry, so we take the UNION of the runs'
+    same place in every figure. That needs one common layout, so we take the UNION of the runs'
     layers (a run missing a layer just leaves that column empty) and the LARGEST num_mlp / num_heads
     seen (assumes the runs share a model, the normal case; mixing different-width models would
     misplace the head columns).

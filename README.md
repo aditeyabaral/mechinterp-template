@@ -459,7 +459,7 @@ we read activations? **At every token of the answer** (plus any prompt positions
 
 If the model answers `42` and that is two tokens `['4', '2']`, the run records activations at both,
 named by the order they were written: `answer_0` (the `'4'`) and `answer_1` (the `'2'`). Each is
-stored under `result["geometry"][name]`, and `result["positions"][name]` gives its token index.
+stored under `result["activations"][name]`, and `result["positions"][name]` gives its token index.
 The answer's **last** token gets a shortcut too, `result["answer"]`: by then the model has committed
 to its answer, so it is often the most informative single place to look. Every tensor recorded at a
 position (residual, MLP neurons, attention heads, and the token / positional embeddings) is read at
@@ -495,7 +495,7 @@ CPU). The shapes shown are GPT-2's; a toy model you trained will have whatever s
         "output_ids": Tensor[7],     # prompt + generated token ids
         "correct": True,             # exactly the answer's tokens, then <eos> (None without an "answer")
         "positions": {"answer_0": 4, "answer_1": 5},   # token index of each captured position
-        "geometry": {                # activations at every captured position
+        "activations": {             # activations at every captured position
           "answer_0": {-1: {...}, 0: {"residual": Tensor[768], "mlp": Tensor[3072], "heads": Tensor[12, 64]}, ...},
           ...                        # -1 = before block 0 (embeddings); find_positions_of_interest's names too
         },

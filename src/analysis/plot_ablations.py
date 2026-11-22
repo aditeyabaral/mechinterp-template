@@ -78,7 +78,7 @@ from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatte
 # This script lives in src/analysis/; put src/ on the import path so utils.* resolves when run
 # as `python src/analysis/plot_ablations.py` from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils.ablations import common_geometry, discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
+from utils.ablations import common_layout, discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
 from utils.plotting import categorical_color_map, save_figure  # noqa: E402
 
 # Heatmaps are split by component TYPE (the "shape" distinction from the scatter) and use the SAME
@@ -417,7 +417,7 @@ if __name__ == "__main__":
     # MLP neurons and one for heads. Use the union of layers and the largest MLP/head counts so runs
     # with different sizes still line up (absent cells stay grey), matching the scatter's 0-fill idea.
     if len(loaded) >= 2:
-        all_layers, max_mlp, max_heads = common_geometry(loaded)
+        all_layers, max_mlp, max_heads = common_layout(loaded)
         if max_mlp:
             make_setting_component_heatmap(
                 abl_by_setting, all_layers, max_mlp, "mlp", out_dir / "heatmap_settings_mlp.png"

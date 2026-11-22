@@ -78,7 +78,7 @@ def find_positions_of_interest(
     also want activations at specific INPUT positions -- e.g. for "7+5=" you might study the
     representations sitting on the "7", the "5", and the "+". This function names those positions
     so inference.py records residual/MLP/head/embedding activations there too, stored under
-    result["geometry"][name]. The default returns nothing, which is fine if you only care about
+    result["activations"][name]. The default returns nothing, which is fine if you only care about
     the answer.
 
     Args:
@@ -274,7 +274,7 @@ def _read_activations_at(
 ) -> dict[str, Any]:
     """Read MLP-neuron, per-head, residual, and embedding activations at ONE token position.
 
-    Shared by `_capture_geometry` (one call per named position) and `_run_single_prompt`
+    Shared by `_activations_at_positions` (one call per named position) and `_run_single_prompt`
     (one call for the answer position), so the cache-indexing logic lives in exactly one place.
 
     Args:
@@ -318,7 +318,7 @@ def _read_activations_at(
     }
 
 
-def _capture_geometry(
+def _activations_at_positions(
     cache: dict[str, torch.Tensor],
     layer_indices: list[int],
     positions: dict[str, int | None],
@@ -339,10 +339,10 @@ def _capture_geometry(
         runs before block 0), plus the decomposed "token_embedding" and "pos_embedding" so you can
         separate content from position.
     """
-    geometry: dict[str, dict] = {}
+    activations: dict[str, dict] = {}
     for name, pos in positions.items():
         act = _read_activations_at(cache, layer_indices, pos)
-        geometry[name] = {
+        activations[name] = {
             # layer_idx = -1 holds the pre-block-0 representation.
             -1: {
                 "resid_pre": act["resid_pre"],
@@ -361,7 +361,7 @@ def _capture_geometry(
             },
         }
 
-    return geometry
+    return activations
 
 
 def _run_single_prompt(
@@ -376,7 +376,7 @@ def _run_single_prompt(
     capture_activations: bool = True,
     capture_logits: bool = False,
 ) -> dict[str, Any]:
-    """Run a single prompt through the model, capturing answer-token and geometry activations.
+    """Run a single prompt through the model, capturing activations at the answer and named positions.
 
     Flow:
       1. Generate a completion (with any ablation hooks active, so the generation reflects the
@@ -407,7 +407,7 @@ def _run_single_prompt(
         (whether the generation is exactly the answer's tokens then <eos>, see src/train/scoring.py;
         None without a ground-truth "answer" in the metadata), and an answer sub-dict (position,
         token_id, token, mlp_neurons, attn_heads, residual, token_embedding, pos_embedding,
-        resid_pre, logits) plus a geometry sub-dict (empty when capture_activations=False). positions (empty
+        resid_pre, logits) plus an activations sub-dict (empty when capture_activations=False). positions (empty
         unless capture_activations or capture_logits) maps each captured position's name to its
         absolute token index: the find_positions_of_interest names, plus "answer_0", "answer_1", ...
         for the answer's tokens in the order they were written. logits (empty unless capture_logits)
@@ -433,7 +433,7 @@ def _run_single_prompt(
     completion = model.to_string(output_ids[prompt_length:]).strip()
 
     # 2. Re-run the whole output sequence once (same ablation) to read logits, plus a full
-    #    activation cache when we need geometry. One pass covers every position, including the
+    #    activation cache when we capture activations. One pass covers every position, including the
     #    answer's last token. Nothing to capture -> no second pass.
     logits, cache = None, None
     if capture_activations:
@@ -475,7 +475,7 @@ def _run_single_prompt(
         position_logits = {name: logits[0, pos].detach().cpu().clone() for name, pos in predicted.items()}
 
     # 4. Read all activations at the answer token's position (same position across every tensor, so
-    #    they all describe the same token), plus the geometry at the prompt positions and at every
+    #    they all describe the same token), plus the activations at the prompt positions and at every
     #    answer token. These are independent: the PROMPT positions are known from the prompt alone,
     #    so they're captured even when the answer couldn't be located (e.g. garbage generation,
     #    which leaves no answer tokens); only the answer-position activations need answer_position
@@ -489,7 +489,7 @@ def _run_single_prompt(
         answer_pos_embedding = answer_act["pos_embedding"]
         answer_resid_pre = answer_act["resid_pre"]
 
-        geometry = _capture_geometry(cache, layer_indices, positions)
+        activations = _activations_at_positions(cache, layer_indices, positions)
     else:
         mlp_neurons = {i: None for i in layer_indices}
         attn_heads = {i: None for i in layer_indices}
@@ -497,7 +497,7 @@ def _run_single_prompt(
         answer_token_embedding = None
         answer_pos_embedding = None
         answer_resid_pre = None
-        geometry = {}
+        activations = {}
 
     return {
         "text": generated_text,
@@ -516,7 +516,7 @@ def _run_single_prompt(
             "resid_pre": answer_resid_pre,
             "logits": answer_logits if capture_logits else None,
         },
-        "geometry": geometry,
+        "activations": activations,
         "positions": positions,
         "logits": position_logits,
     }
@@ -532,7 +532,7 @@ def run(
     capture_activations: bool = True,
     capture_logits: bool = False,
 ) -> list[dict[str, Any]]:
-    """Run inference over a dataset, capturing MLP-neuron, per-head, residual, and geometry activations.
+    """Run inference over a dataset, capturing MLP-neuron, per-head, residual, and embedding activations.
 
     Args:
         model: The TransformerLens bridge.
@@ -608,7 +608,7 @@ def run(
 NOT_APPLICABLE = 255
 
 
-def step_names(n_steps: int) -> list[str]:
+def _step_names(n_steps: int) -> list[str]:
     """The step names for answers of up to n_steps tokens: step0, ..., step{n_steps-1}, then eos."""
     return [f"step{i}" for i in range(n_steps)] + ["eos"]
 
@@ -629,7 +629,7 @@ def build_teacher_forced_batches(
         batch_size: Maximum sequences per forward pass.
 
     Returns:
-        (batches, names): names are the step columns (see step_names). Each batch is
+        (batches, names): names are the step columns (see _step_names). Each batch is
         {"indices": prompt indices [B], "tokens": [B, prompt_length + answer_length + 1] on the
         model's device, "prompt_length": int, "columns": the column of each answer step, in order}.
     """
@@ -646,7 +646,7 @@ def build_teacher_forced_batches(
         groups.setdefault((len(prompt_tokens), len(answer_ids)), []).append((i, tokens))
 
     longest = max((n_answer for _, n_answer in groups), default=0)
-    names = step_names(longest)
+    names = _step_names(longest)
     batches: list[dict[str, Any]] = []
     for (prompt_length, n_answer), members in sorted(groups.items()):
         columns = list(range(n_answer)) + [names.index("eos")]

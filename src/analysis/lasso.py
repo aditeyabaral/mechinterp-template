@@ -208,7 +208,7 @@ def _feature_vector(acts: dict[str, Any]) -> np.ndarray | None:
     """Build one feature row for a layer: [MLP neurons | per-head L2 norm], or None if unavailable.
 
     `acts` is one position's activations at one layer, as main.py saves them in
-    row["result"]["geometry"][position][layer]. Each attention head outputs a [head_dim] vector; we
+    row["result"]["activations"][position][layer]. Each attention head outputs a [head_dim] vector; we
     summarise it by its L2 norm (one number per head, "how much this head fired") so heads and
     neurons live in the same feature matrix.
     """
@@ -222,7 +222,7 @@ def _feature_vector(acts: dict[str, Any]) -> np.ndarray | None:
     return np.concatenate([mlp.numpy(), head_norms.numpy()])
 
 
-def accumulate_features(
+def _accumulate_features(
     rows: list[dict[str, Any]],
     metadata: dict[str, Any],
     layer_indices: list[int],
@@ -241,7 +241,7 @@ def accumulate_features(
         condition = assign_condition(row, metadata)
         if condition is None:
             continue
-        for position, by_layer in row["result"]["geometry"].items():
+        for position, by_layer in row["result"]["activations"].items():
             target = build_target(row, metadata, position)
             if target is None:
                 continue
@@ -255,7 +255,7 @@ def accumulate_features(
                 layer_bucket["y"].append(target)
 
 
-def finalize_matrices(
+def _finalize_matrices(
     buckets: dict[str, dict[int, dict[str, list]]],
 ) -> dict[str, dict[int, dict[str, np.ndarray]]]:
     """Convert accumulated feature lists into numpy arrays, once every file has been processed.
@@ -378,11 +378,11 @@ if __name__ == "__main__":
         if not layer_indices:
             layer_indices = metadata.get("layer_indices", [])
             num_heads = metadata.get("num_attention_heads", 0)
-        accumulate_features(rows, metadata, layer_indices, buckets)
+        _accumulate_features(rows, metadata, layer_indices, buckets)
         print(f"{pt_file.name}: {len(rows)} rows")
         del rows, loaded  # free this file's raw activations before loading the next
 
-    matrices = finalize_matrices(buckets)
+    matrices = _finalize_matrices(buckets)
     if not matrices:
         raise SystemExit(
             f"No usable rows found in {args.dir} -- the .pt files may lack a 'baseline' key or activations "

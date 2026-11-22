@@ -21,7 +21,7 @@ The hook names you'll use downstream (see src/inference.py) are uniform across a
     blocks.{i}.mlp.hook_post     MLP intermediate "neurons"      [batch, pos, d_mlp]
     blocks.{i}.attn.hook_z       per-head attention output       [batch, pos, n_heads, d_head]
     hook_embed                   token embedding (pre-block 0)   [batch, pos, d_model]
-    hook_pos_embed               positional embedding (pre-block 0) [batch, pos, d_model]
+    hook_pos_embed               positional embedding (pre-block 0; not in rotary models) [batch, pos, d_model]
     blocks.0.hook_resid_pre      block 0's input = token_embed + pos_embed [batch, pos, d_model]
 
 A note on config names: TransformerLens renames the HuggingFace GPT-2 config fields, so the size
@@ -38,6 +38,13 @@ This file is generic infrastructure -- you normally will NOT need to edit it.
 
 import torch
 from transformer_lens.model_bridge import TransformerBridge
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+
+def _tokenizer_adds_bos(tokenizer: PreTrainedTokenizerBase) -> bool:
+    """Whether the tokenizer puts a BOS token at the start of every text it encodes."""
+    ids = tokenizer("x")["input_ids"]
+    return tokenizer.bos_token_id is not None and len(ids) > 0 and ids[0] == tokenizer.bos_token_id
 
 
 def load_model(model_path: str, device: torch.device | str | None = None) -> TransformerBridge:
@@ -71,4 +78,8 @@ def load_model(model_path: str, device: torch.device | str | None = None) -> Tra
     # We pass the device through; everything else (config, sizes) is inferred from the checkpoint.
     model = TransformerBridge.boot_transformers(model_path, device=str(device))
     model.eval()  # inference mode: disable dropout etc. (we never train during analysis)
+
+    # TransformerLens prepends a BOS token by default; add one only if the model's own tokenizer does,
+    # so prompts are tokenized as in training.
+    model.cfg.default_prepend_bos = _tokenizer_adds_bos(AutoTokenizer.from_pretrained(model_path))
     return model

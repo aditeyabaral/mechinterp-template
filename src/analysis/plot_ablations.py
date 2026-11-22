@@ -7,7 +7,7 @@ and it reads everything it needs from the files:
 
 Each .pt in the directory is one intervention run -- one `main.py --intervention` invocation.
 We call each run a SETTING. Every figure's cell/point value is accuracy_drop (baseline_accuracy -
-ablated_accuracy). Un-measured cells are grey. From the runs it draws:
+ablated_accuracy), or the drop chosen with --metric. Un-measured cells are grey. From the runs it draws:
 
   HEATMAPS -- split by component type (MLP vs heads), with the layer axis in the shared per-layer
   colours (the same shape/colour scheme as the scatter):
@@ -35,12 +35,10 @@ come from each file's saved metadata, and every .pt in --dir is used as a settin
 filename, which is how it appears on the scatter axes and in the saved figure names).
 
 WHAT YOU NEED FIRST (read this before running): each ablation entry must carry an `accuracy_drop`,
-which intervention mode records via `is_correct` in src/main.py. That default scores a row correct
-when the model's answer (row["result"]["answer"]["token"]) equals an "answer" stored in that
-prompt's metadata, so the drops are only meaningful if your prompts carry a ground-truth "answer"
-(see PromptDataset.generate_prompts in src/utils/dataset.py) AND `is_correct` matches your task.
-Without that, every drop is 0 and the figures are blank. See the `load_ablations` docstring for the
-exact fields expected.
+which intervention mode records in src/main.py. An answer counts as right when the model produces
+exactly the "answer" stored in that prompt's metadata, then <eos> (src/train/scoring.py), so your
+prompts must carry a ground-truth "answer" (see PromptDataset.generate_prompts in
+src/utils/dataset.py). See the `load_ablations` docstring for the exact fields expected.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
   - The task-agnostic loaders live in src/utils/ablations.py (shared with src/analysis/plot_circuits.py); they
@@ -80,12 +78,15 @@ from matplotlib.lines import Line2D  # noqa: E402  (proxy handles for the scatte
 # This script lives in src/analysis/; put src/ on the import path so utils.* resolves when run
 # as `python src/analysis/plot_ablations.py` from the repo root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from utils.ablations import common_geometry, discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
+from utils.ablations import common_layout, discover_settings, infer_num_mlp, load_settings, neuron_label  # noqa: E402
 from utils.plotting import categorical_color_map, save_figure  # noqa: E402
 
 # Heatmaps are split by component TYPE (the "shape" distinction from the scatter) and use the SAME
 # per-layer colours (via categorical_color_map) on the layer axis, so the two figure families read alike.
 TYPE_NOUN = {"mlp": "MLP neuron", "head": "attention head"}
+
+# How the drop is named on the figures; main sets it from --metric (e.g. "step:eos accuracy drop").
+DROP_LABEL = "accuracy drop"
 
 
 def _drop_matrix(ablations: list[dict[str, Any]], layers: list[int], count: int, feat_type: str) -> np.ndarray:
@@ -146,7 +147,7 @@ def make_layer_component_heatmap(
         row_colors=[layer_color[layer] for layer in layers],
         xlabel=f"{noun} index (0..{count - 1})",
         ylabel="layer",
-        title=f"{label}: {noun} ablation accuracy drop",
+        title=f"{label}: {noun} ablation {DROP_LABEL}",
         out=out,
         col_tick_step=max(count // 16, 1),
     )
@@ -176,7 +177,7 @@ def make_setting_component_heatmap(
         row_labels=settings,
         xlabel=f"(layer, {noun} index) flattened -- each layer block spans index 0..{count - 1}",
         ylabel="setting",
-        title=f"{noun} ablation accuracy drop per setting",
+        title=f"{noun} ablation {DROP_LABEL} per setting",
         out=out,
         col_ticks=[i * count + count // 2 for i in range(len(layers))],  # one tick per layer block, centred
         col_tick_labels=[f"L{layer}" for layer in layers],
@@ -228,7 +229,7 @@ def _save_heatmap(
     fig, ax = plt.subplots(figsize=(width, 1.2 + 0.5 * matrix.shape[0]))
     im = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, vmin=-vmax, vmax=vmax)
     ax.grid(False)  # the seaborn theme's gridlines would otherwise show over the heatmap cells
-    fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01, label="accuracy drop")
+    fig.colorbar(im, ax=ax, fraction=0.025, pad=0.01, label=DROP_LABEL)
 
     ax.set_yticks(range(len(row_labels)))
     ax.set_yticklabels(row_labels)
@@ -319,8 +320,8 @@ def make_scatter(
         ax.annotate(neuron_label(info["layer_idx"], info["type"], info["local_idx"]), (x, y), fontsize=4, alpha=0.6)
 
     ax.axline((0, 0), slope=1, linestyle="--", color="grey")  # y = x: equally important to both
-    ax.set_xlabel(f"avg accuracy drop ({label_a})")
-    ax.set_ylabel(f"avg accuracy drop ({label_b})")
+    ax.set_xlabel(f"avg {DROP_LABEL} ({label_a})")
+    ax.set_ylabel(f"avg {DROP_LABEL} ({label_b})")
     ax.set_title(f"Per-component ablation effect: {label_a} vs {label_b}")
 
     # Two legends: one decoding the SHAPES (component type), one the COLOURS (layer). Both use grey/
@@ -363,6 +364,13 @@ if __name__ == "__main__":
         "file is one setting; layer/head/MLP counts are read from each file, so nothing else is needed.",
     )
     parser.add_argument("--output", "-o", default="plots", help="Directory to write the figures into.")
+    parser.add_argument(
+        "--metric",
+        default="accuracy_drop",
+        help="Which drop to plot: accuracy_drop (whole answer, the default), mean_step_accuracy_drop (averaged "
+        "over the answer steps) or step:<name> for one step, e.g. step:step0 (the answer's first token) or "
+        "step:eos (stopping).",
+    )
     args = parser.parse_args()
 
     sns.set_theme(style="whitegrid")
@@ -370,9 +378,11 @@ if __name__ == "__main__":
     # Each .pt in --dir is one setting, labelled by its filename.
     settings = discover_settings(Path(args.dir))
     if not settings:
-        raise SystemExit(f"No .pt files found in {args.dir}.")
+        raise SystemExit(f"No .pt files found in {args.dir}")
 
-    loaded = load_settings(settings)  # {label: (summary, metadata)}; each ~1GB file read once
+    if args.metric != "accuracy_drop":
+        DROP_LABEL = f"{args.metric.removesuffix('_accuracy_drop').replace('_', ' ')} accuracy drop"
+    loaded = load_settings(settings, args.metric)  # {label: (summary, metadata)}; each ~1GB file read once
     if not loaded:
         raise SystemExit(
             f"No usable intervention runs among {sorted(settings)} -- the .pt files may be incomplete "
@@ -407,7 +417,7 @@ if __name__ == "__main__":
     # MLP neurons and one for heads. Use the union of layers and the largest MLP/head counts so runs
     # with different sizes still line up (absent cells stay grey), matching the scatter's 0-fill idea.
     if len(loaded) >= 2:
-        all_layers, max_mlp, max_heads = common_geometry(loaded)
+        all_layers, max_mlp, max_heads = common_layout(loaded)
         if max_mlp:
             make_setting_component_heatmap(
                 abl_by_setting, all_layers, max_mlp, "mlp", out_dir / "heatmap_settings_mlp.png"

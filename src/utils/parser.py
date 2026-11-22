@@ -28,7 +28,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         type=int,
         required=False,
-        help="List of layer indices to analyze. Defaults to all decoder layers.",
+        help="Layer indices to capture from (and to ablate with --intervention all). Defaults to all decoder layers.",
     )
     parser.add_argument(
         "--num-prompts",
@@ -42,14 +42,15 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "-mnt",
         type=int,
         required=False,
-        default=200,
-        help="Maximum number of new tokens to generate. Defaults to 200.",
+        default=None,
+        help="Maximum number of new tokens to generate. Defaults to the longest ground-truth answer (in "
+        "tokens) plus one for <eos>, or 16 if the prompts carry no 'answer'.",
     )
     parser.add_argument(
         "--output",
         "-out",
         type=str,
-        help="Directory where the output file will be saved.",
+        help="Path of the output .pt file. Defaults to a name built from the run's parameters (src/utils/dir.py).",
     )
     parser.add_argument(
         "--seed",
@@ -62,20 +63,35 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
 
     # --- Core mechinterp toggles (capture + intervention) ---
     # The flags are generic; their specifics are defined by your inference code:
-    #   - what activations / token positions --capture-geometry records, and
+    #   - what activations / token positions --capture-activations records, and
     #   - the file format the --intervention spec is read from.
     parser.add_argument(
-        "--capture-geometry",
+        "--capture-activations",
         action="store_true",
         help="Capture detailed per-position activations (MLP neurons, attention heads, residual stream) "
-        "in addition to the model output. Omit for lightweight runs such as large ablation sweeps.",
+        "at every answer token and at find_positions_of_interest's prompt positions, in addition to the "
+        "model output. Not needed for an ablation sweep (--intervention), which only scores answers.",
+    )
+    parser.add_argument(
+        "--capture-logits",
+        action="store_true",
+        help="Also store the logits that predict each answer token and the <eos> after it. They are often "
+        "most of a file's size, and can be rebuilt from the last layer's residual stream.",
     )
     parser.add_argument(
         "--intervention",
         type=str,
         default=None,
-        help="Path to an intervention spec (e.g. a JSON listing neurons/heads to ablate or patch). "
-        "When provided, an intervention pass is run after the baseline.",
+        help="Path to an intervention spec (e.g. the output json of src/analysis/lasso.py) listing "
+        "neurons/heads to ablate, or 'all' to ablate every MLP neuron and attention head of --layers "
+        "one at a time. When provided, an ablation sweep is run after the baseline.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=256,
+        help="Sequences per forward pass in the teacher-forced ablation sweep. Defaults to 256; lower it "
+        "if you run out of GPU memory.",
     )
 
     # ----------------------------------------------------------------------- #

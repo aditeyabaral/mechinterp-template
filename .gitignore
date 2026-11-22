@@ -17,3 +17,4 @@ wandb/
 analysis_results*/
 .claude/
 artifacts/
+.env

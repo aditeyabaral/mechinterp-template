@@ -13,11 +13,31 @@ from typing import Any
 import torch
 
 
-def load_ablations(pt_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+def _metric_value(entry: dict[str, Any], metric: str) -> float:
+    """One ablation entry's drop under `metric`, the score the plots show.
+
+    "accuracy_drop" is the whole-answer drop (the default); "mean_step_accuracy_drop" the drop
+    averaged over the answer steps; "step:<name>" the drop at one step, where <name> is one of the
+    run's metadata["step_names"] (e.g. "step:step0" for the answer's first token, "step:eos" for
+    stopping), NaN if no prompt has that step.
+    """
+    if metric == "accuracy_drop":
+        return float(entry[metric])
+    if metric == "mean_step_accuracy_drop":
+        drops = entry["step_accuracy_drop"]
+        return sum(drops.values()) / len(drops)
+    if metric.startswith("step:"):
+        return float(entry["step_accuracy_drop"].get(metric[len("step:") :], float("nan")))
+    raise ValueError(f"Unknown metric {metric!r}: use accuracy_drop, mean_step_accuracy_drop or step:<name>")
+
+
+def load_ablations(pt_path: Path, metric: str = "accuracy_drop") -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
     """Load one intervention file's per-component ablation summary + metadata, dropping heavy rows.
 
     Args:
         pt_path: A .pt file written by `src/main.py --intervention` (has an "ablations" key).
+        metric: Which drop the summary's "accuracy_drop" holds (see _metric_value); the default is the
+            whole-answer accuracy drop.
 
     Returns:
         (summary, metadata), or None if the file is absent, empty (a still-running / failed run), or
@@ -27,8 +47,7 @@ def load_ablations(pt_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]
         rows are discarded here, so only the small summary + metadata stay in memory (each .pt ~1GB).
 
     Raises:
-        KeyError: if the ablations don't record `accuracy_drop` (see plot_ablations' module docstring
-            -- you need to add accuracy scoring to intervention mode first).
+        KeyError: if the ablations don't record `accuracy_drop` (a file not written by main.py --intervention).
     """
     if not pt_path.exists() or pt_path.stat().st_size == 0:
         print(f"  [skip] {pt_path.name}: missing or empty (incomplete run)")
@@ -39,8 +58,7 @@ def load_ablations(pt_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]
         return None
     if loaded["ablations"] and "accuracy_drop" not in loaded["ablations"][0]:
         raise KeyError(
-            f"{pt_path.name}: ablations have no 'accuracy_drop'. Intervention mode must score "
-            "accuracy and store accuracy_drop per ablation -- see the plot_ablations module docstring."
+            f"{pt_path.name}: ablations have no 'accuracy_drop' -- was it written by src/main.py --intervention?"
         )
     summary = [
         {
@@ -48,7 +66,7 @@ def load_ablations(pt_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]
             "type": a["type"],
             "local_idx": a["local_idx"],
             "feature_idx": a["feature_idx"],
-            "accuracy_drop": a["accuracy_drop"],
+            "accuracy_drop": _metric_value(a, metric),
         }
         for a in loaded["ablations"]
     ]
@@ -88,11 +106,11 @@ def discover_settings(directory: Path) -> dict[str, Path]:
     return {path.stem: path for path in sorted(directory.glob("*.pt"))}
 
 
-def common_geometry(loaded: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]) -> tuple[list[int], int, int]:
-    """The shared node geometry across every loaded setting: (layers, num_mlp, num_heads).
+def common_layout(loaded: dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]) -> tuple[list[int], int, int]:
+    """The shared node layout across every loaded setting: (layers, num_mlp, num_heads).
 
     Both plotting scripts lay every setting out on the SAME axes so a given neuron/head sits in the
-    same place in every figure. That needs one common geometry, so we take the UNION of the runs'
+    same place in every figure. That needs one common layout, so we take the UNION of the runs'
     layers (a run missing a layer just leaves that column empty) and the LARGEST num_mlp / num_heads
     seen (assumes the runs share a model, the normal case; mixing different-width models would
     misplace the head columns).
@@ -113,11 +131,14 @@ def common_geometry(loaded: dict[str, tuple[list[dict[str, Any]], dict[str, Any]
     return layers, num_mlp, num_heads
 
 
-def load_settings(settings: dict[str, Path]) -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
+def load_settings(
+    settings: dict[str, Path], metric: str = "accuracy_drop"
+) -> dict[str, tuple[list[dict[str, Any]], dict[str, Any]]]:
     """Load each setting's .pt once, keeping only the ones with usable ablations.
 
     Args:
         settings: {label: intervention .pt path} (from discover_settings).
+        metric: Which drop to load (see _metric_value).
 
     Returns:
         {label: (summary, metadata)} for the files that loaded -- missing/empty/non-intervention
@@ -126,7 +147,7 @@ def load_settings(settings: dict[str, Path]) -> dict[str, tuple[list[dict[str, A
     """
     loaded = {}
     for label, path in settings.items():
-        result = load_ablations(Path(path))
+        result = load_ablations(Path(path), metric)
         if result and result[0]:  # has ablations
             loaded[label] = result
     return loaded

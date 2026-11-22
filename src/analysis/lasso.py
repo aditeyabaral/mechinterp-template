@@ -4,7 +4,7 @@ This is an OPTIONAL analysis step. It turns the activations captured by main.py 
 spec file (lasso_shortlist.json) that `python src/main.py --intervention lasso_shortlist.json` then uses
 to ablate the flagged neurons/heads and measure their causal effect.
 
-Pipeline (one .pt file at a time -- see main() -- so only one file's raw activations are ever
+Pipeline (one .pt file at a time -- see the end of this file -- so only one file's raw activations are ever
 resident in memory; each file is freed before the next is loaded, since activation files are large.
 Only the compact feature matrices, not the raw rows, accumulate across files):
   1. Load saved inference results (.pt files from main.py --capture-activations) -> one row per prompt,
@@ -126,7 +126,8 @@ def assign_condition(row: dict[str, Any], metadata: dict[str, Any]) -> str | Non
     # is fine if you just want a single set of important features.
     #
     # WHY: comparing conditions answers "are DIFFERENT neurons/heads important in situation A vs B?"
-    # -- e.g. prompts the model got right vs wrong, or two kinds of question. You define the split
+    # -- e.g. two kinds of question, or prompts the model got right vs wrong (for that, also change
+    # keep_row, which by default drops the wrong ones). You define the split
     # from whatever each row contains:
     #     row["prompt"]                    -> the prompt string you ran
     #     row["result"]["answer"]["token"] -> the answer string the model generated
@@ -400,8 +401,8 @@ if __name__ == "__main__":
         if num_mlp:
             break
 
-    # lasso_shortlist.json (consumed by main.py): per layer, per condition, the important features and
-    # their Lasso coefficients. A top-level "conditions" block records how many rows backed each
+    # lasso_shortlist.json (consumed by main.py): per layer, per condition and position, the important
+    # features and their weights. A top-level "conditions" block records how many rows backed each
     # condition, so a short feature list can be told apart from "too little data to fit reliably".
     analysis: dict[str, Any] = {
         "num_mlp_neurons": num_mlp,

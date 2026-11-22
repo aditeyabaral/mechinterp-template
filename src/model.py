@@ -21,7 +21,7 @@ The hook names you'll use downstream (see src/inference.py) are uniform across a
     blocks.{i}.mlp.hook_post     MLP intermediate "neurons"      [batch, pos, d_mlp]
     blocks.{i}.attn.hook_z       per-head attention output       [batch, pos, n_heads, d_head]
     hook_embed                   token embedding (pre-block 0)   [batch, pos, d_model]
-    hook_pos_embed               positional embedding (pre-block 0) [batch, pos, d_model]
+    hook_pos_embed               positional embedding (pre-block 0; not in rotary models) [batch, pos, d_model]
     blocks.0.hook_resid_pre      block 0's input = token_embed + pos_embed [batch, pos, d_model]
 
 A note on config names: TransformerLens renames the HuggingFace GPT-2 config fields, so the size

@@ -28,7 +28,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         nargs="+",
         type=int,
         required=False,
-        help="List of layer indices to analyze. Defaults to all decoder layers.",
+        help="Layer indices to capture from (and to ablate with --intervention all). Defaults to all decoder layers.",
     )
     parser.add_argument(
         "--num-prompts",
@@ -70,7 +70,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Capture detailed per-position activations (MLP neurons, attention heads, residual stream) "
         "at every answer token and at find_positions_of_interest's prompt positions, in addition to the "
-        "model output. Omit for lightweight runs such as large ablation sweeps.",
+        "model output. Not needed for an ablation sweep (--intervention), which only scores answers.",
     )
     parser.add_argument(
         "--capture-logits",

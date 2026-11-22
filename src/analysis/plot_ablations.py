@@ -7,7 +7,7 @@ and it reads everything it needs from the files:
 
 Each .pt in the directory is one intervention run -- one `main.py --intervention` invocation.
 We call each run a SETTING. Every figure's cell/point value is accuracy_drop (baseline_accuracy -
-ablated_accuracy). Un-measured cells are grey. From the runs it draws:
+ablated_accuracy), or the drop chosen with --metric. Un-measured cells are grey. From the runs it draws:
 
   HEATMAPS -- split by component type (MLP vs heads), with the layer axis in the shared per-layer
   colours (the same shape/colour scheme as the scatter):
@@ -38,8 +38,7 @@ WHAT YOU NEED FIRST (read this before running): each ablation entry must carry a
 which intervention mode records in src/main.py. An answer counts as right when the model produces
 exactly the "answer" stored in that prompt's metadata, then <eos> (src/train/scoring.py), so your
 prompts must carry a ground-truth "answer" (see PromptDataset.generate_prompts in
-src/utils/dataset.py). See the `load_ablations` docstring for the
-exact fields expected.
+src/utils/dataset.py). See the `load_ablations` docstring for the exact fields expected.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
   - The task-agnostic loaders live in src/utils/ablations.py (shared with src/analysis/plot_circuits.py); they
@@ -379,7 +378,7 @@ if __name__ == "__main__":
     # Each .pt in --dir is one setting, labelled by its filename.
     settings = discover_settings(Path(args.dir))
     if not settings:
-        raise SystemExit(f"No .pt files found in {args.dir}.")
+        raise SystemExit(f"No .pt files found in {args.dir}")
 
     if args.metric != "accuracy_drop":
         DROP_LABEL = f"{args.metric.removesuffix('_accuracy_drop').replace('_', ' ')} accuracy drop"

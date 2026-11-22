@@ -1,6 +1,6 @@
 """Entry point for running inference that captures MLP neuron and attention head activations.
 
-Normal mode:   run N prompts, save activations.
+Normal mode:   run N prompts, save the answers (and, with --capture-activations, the activations).
 Intervention mode (--intervention <lasso_shortlist.json>, or --intervention all for every neuron and head):
     Run the same N prompts without hooks (baseline), then for each important
     neuron/head in the JSON re-run the same N prompts with that feature zeroed,
@@ -82,6 +82,10 @@ if __name__ == "__main__":
     #    you implement. If your task needs extra parameters (operator, few-shot count, ...), add them as
     #    CLI args in src/utils/parser.py and forward them here.
     dataset = utils.dataset.PromptDataset.generate_prompts(num_prompts=args.num_prompts)
+    # An ablation sweep scores answers, so check for them before the (possibly long) baseline run.
+    missing_answer = any(entry.get("metadata", {}).get("answer") is None for entry in dataset.prompts)
+    if args.intervention is not None and missing_answer:
+        raise ValueError("--intervention needs a ground-truth 'answer' in every prompt's metadata")
     if args.max_new_tokens is None:
         args.max_new_tokens = _default_max_new_tokens(model, dataset)
         print(f"--max-new-tokens: {args.max_new_tokens} (the longest answer plus <eos>)")
@@ -124,7 +128,7 @@ if __name__ == "__main__":
         "num_mlp_neurons": model.cfg.d_mlp,
     }
 
-    # 8a. Normal mode: just save the baseline activations plus run metadata. Saved under "baseline"
+    # 8a. Normal mode: just save the baseline run plus run metadata. Saved under "baseline"
     #     (the same key intervention mode uses below) since both are the same thing: an unablated
     #     inference.run() pass.
     if args.intervention is None:

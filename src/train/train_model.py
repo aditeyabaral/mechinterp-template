@@ -41,7 +41,7 @@ from transformers import (
     TrainingArguments,
 )
 
-# (src/train/scoring.py): the rule for a correct answer, shared with inference and analysis.
+# The rule for a correct answer, shared with inference and analysis (src/train/scoring.py, next to this file).
 from scoring import is_correct
 
 # --------------------------------------------------------------------------- #
@@ -355,8 +355,8 @@ if __name__ == "__main__":
     def tokenize(batch: dict) -> dict:
         """Turn each (prompt, answer) pair into one token sequence the model learns to predict.
 
-        We train on the full sequence "prompt + answer + EOS". The model learns next-token
-        prediction over the whole thing, so it learns both to continue prompts and to stop (EOS).
+        Each row becomes the sequence "prompt + answer + EOS"; the model learns to write the answer
+        and then stop (EOS).
 
         The prompt and the answer are tokenized SEPARATELY and then joined, so the prompt's tokens
         are exactly those the model sees at evaluation and inference time, where the prompt is

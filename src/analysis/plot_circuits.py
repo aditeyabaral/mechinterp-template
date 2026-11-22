@@ -16,11 +16,12 @@ same neuron sits at the same spot in every image and you can compare settings at
 
 WHAT "SURVIVING" MEANS: for each layer we take the accuracy_drop of every component that run ablated
 and keep only the ones in the top-p PERCENTILE (default 99; try 95 with --percentile if the surviving
-set is too sparse to see) whose drop is above 0. accuracy_drop is baseline_accuracy - ablated_accuracy,
-so a survivor is a component the model leaned on heavily in that setting. EVERY neuron/head is drawn (all at the same
-size, so the whole population is visible); survivors are told apart by COLOUR (blue = MLP neuron,
-orange = attention head) against the grey non-survivors, which makes the SPARSITY of the circuit
-visible -- a few load-bearing components picked out against the full population.
+set is too sparse to see) whose drop is above 0. accuracy_drop is baseline_accuracy -
+ablated_accuracy, so a survivor is a component the model leaned on heavily in that setting. EVERY
+neuron/head is drawn (all at the same size, so the whole population is visible); survivors are told
+apart by COLOUR (blue = MLP neuron, orange = attention head) against the grey non-survivors, which
+makes the SPARSITY of the circuit visible -- a few load-bearing components picked out against the
+full population.
 
 WHAT THE EDGES MEAN: within a setting we connect every surviving component of one layer to every
 surviving component of the next (a complete bipartite link between adjacent survivor sets). The
@@ -28,7 +29,7 @@ reasoning is deliberately simple: our ablation experiment showed BOTH endpoints 
 for the correct answer in that setting, so we treat them as co-participating in one circuit. (This is
 a coarse "they both matter" edge, not a measured connection -- see HOW TO EXTEND to make it stronger.)
 
-THE FIGURES: S + 1 separate images --
+THE FIGURES: S + 1 separate images (S with a single setting) --
   * one image PER setting (circuit_<setting>.png), its edges drawn in black;
   * one COMBINED image (circuit_combined.png) overlaying every setting's edges at once, each setting
     in its OWN colour, so you can see where the settings route through the same components and where
@@ -46,10 +47,9 @@ Nothing here needs editing to run: the layer count, head count and MLP/head spli
 from each file's saved metadata (via the shared loaders in src/utils/ablations.py), and every .pt in
 --dir is used, labelled by its filename.
 
-WHAT YOU NEED FIRST: like src/analysis/plot_ablations.py, every ablation entry must carry an `accuracy_drop`
-(intervention mode records it in src/main.py). If your prompts have no ground-truth
-"answer" the drops are all 0, the percentile filter keeps nothing, and the circuit is empty. See the
-src/analysis/plot_ablations.py module docstring for the exact fields and how to add accuracy scoring.
+WHAT YOU NEED FIRST: like src/analysis/plot_ablations.py, intervention .pt files from src/main.py
+--intervention, whose every ablation entry carries an `accuracy_drop` (so your prompts need a
+ground-truth "answer"). --metric picks another drop to rank by, as in plot_ablations.py.
 
 WHAT YOU CAN CHANGE / HOW TO EXTEND:
   - `compute_survivors` is the whole selection rule (top-p percentile of accuracy_drop per layer).
@@ -493,7 +493,7 @@ if __name__ == "__main__":
 
     settings = discover_settings(Path(args.dir))  # {label: .pt path}, one per setting, labelled by filename
     if not settings:
-        raise SystemExit(f"No .pt files found in {args.dir}.")
+        raise SystemExit(f"No .pt files found in {args.dir}")
 
     loaded = load_settings(settings, args.metric)  # {label: (summary, metadata)}; skips non-intervention / empty files
     if not loaded:

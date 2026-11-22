@@ -16,7 +16,7 @@ HOW CAPTURE AND ABLATION WORK HERE (the TransformerLens idea):
             blocks.{l}.mlp.hook_post     MLP intermediate "neurons"      [batch, pos, d_mlp]
             blocks.{l}.attn.hook_z       per-head attention output       [batch, pos, n_heads, d_head]
             hook_embed                   token embedding (pre-block 0)   [batch, pos, d_model]
-            hook_pos_embed               positional embedding (pre-block 0) [batch, pos, d_model]
+            hook_pos_embed               positional embedding (pre-block 0; not in rotary models) [batch, pos, d_model]
             blocks.0.hook_resid_pre      token_embed + pos_embed (block 0's input) [batch, pos, d_model]
       - model.run_with_hooks(tokens, fwd_hooks=[(name, fn), ...]): runs the model while calling
         each fn on the named activation, letting fn EDIT it (we set entries to 0 to ablate).
@@ -274,7 +274,7 @@ def _read_activations_at(
 ) -> dict[str, Any]:
     """Read MLP-neuron, per-head, residual, and embedding activations at ONE token position.
 
-    Shared by `_capture_geometry` (one call per named prompt position) and `_run_single_prompt`
+    Shared by `_capture_geometry` (one call per named position) and `_run_single_prompt`
     (one call for the answer position), so the cache-indexing logic lives in exactly one place.
 
     Args:
@@ -290,9 +290,12 @@ def _read_activations_at(
          "pos_embedding": Tensor | None, "resid_pre": Tensor | None}. "resid_pre" is block 0's
          actual input (blocks.0.hook_resid_pre, i.e. token_embedding + pos_embedding), read
          directly from the cache rather than summed so it stays correct for any architecture.
+         "pos_embedding" is None for models without a learned positional embedding (e.g. Llama,
+         whose rotary embedding acts inside attention).
     """
     embed = cache["hook_embed"][0]  # [seq_len, d_model]
     in_range = pos is not None and 0 <= pos < embed.shape[0]
+    has_pos_embed = "hook_pos_embed" in cache
 
     # .clone(): on the CPU, .cpu() returns a VIEW of the cache tensor, and torch.save would then write
     # the whole tensor behind it (every position) instead of this one position.
@@ -310,7 +313,7 @@ def _read_activations_at(
             for i in layer_indices
         },
         "token_embedding": embed[pos].detach().cpu().clone() if in_range else None,
-        "pos_embedding": cache["hook_pos_embed"][0, pos].detach().cpu().clone() if in_range else None,
+        "pos_embedding": cache["hook_pos_embed"][0, pos].detach().cpu().clone() if in_range and has_pos_embed else None,
         "resid_pre": cache["blocks.0.hook_resid_pre"][0, pos].detach().cpu().clone() if in_range else None,
     }
 
@@ -320,13 +323,13 @@ def _capture_geometry(
     layer_indices: list[int],
     positions: dict[str, int | None],
 ) -> dict[str, dict[int, dict[str, torch.Tensor | None]]]:
-    """Slice residual / MLP / head / embedding activations at named prompt positions out of the cache.
+    """Slice residual / MLP / head / embedding activations at named positions out of the cache.
 
     Args:
         cache: The activation cache from model.run_with_cache over the full output sequence.
         layer_indices: Layer indices to extract from.
-        positions: Mapping {name: token_index} of prompt positions (from find_positions_of_interest);
-            any index may be None.
+        positions: Mapping {name: token_index}: find_positions_of_interest's prompt positions and the
+            answer's tokens ("answer_0", ...); any index may be None.
 
     Returns:
         dict mapping each position name to layer_idx ->
@@ -379,7 +382,7 @@ def _run_single_prompt(
       1. Generate a completion (with any ablation hooks active, so the generation reflects the
          knocked-out components).
       2. Re-run the FULL output sequence once -- with the same hooks -- to get logits, and (when
-         capturing geometry) a cache of every layer/position activation. Skipped when nothing is
+         capturing activations) a cache of every layer/position activation. Skipped when nothing is
          captured: the answer itself comes from the generated tokens alone.
       3. Locate the answer span and read activations at each of its tokens (and at the prompt
          positions of find_positions_of_interest).
@@ -394,8 +397,7 @@ def _run_single_prompt(
         mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero out.
         head_ablation: Optional dict {layer_idx: [head indices]} to zero out.
         capture_activations: If True, read per-position activations (MLP neurons, heads, residual,
-            token/positional embedding) and store output_ids. Set False during ablation sweeps to
-            store less data.
+            token/positional embedding) and store output_ids. False stores only the generated answer.
         capture_logits: If True, store the logits that predict each answer token and the <eos>
             after it. They are often most of a file's size, and they can be rebuilt from the last
             layer's residual stream: model.unembed(model.ln_final(resid)).
@@ -541,8 +543,7 @@ def run(
         mlp_ablation: Optional dict {layer_idx: [neuron indices]} to zero on every prompt.
         head_ablation: Optional dict {layer_idx: [head indices]} to zero on every prompt.
         capture_activations: If True, capture activations at every answer token and at the
-            find_positions_of_interest positions. Set False during ablation sweeps to avoid
-            storing per-feature geometry data.
+            find_positions_of_interest positions. False stores only the generated answers (much smaller).
         capture_logits: If True, also store the logits that predict each answer token and the
             <eos> after it (see _run_single_prompt).
 

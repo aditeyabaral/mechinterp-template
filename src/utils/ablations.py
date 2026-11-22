@@ -47,8 +47,7 @@ def load_ablations(pt_path: Path, metric: str = "accuracy_drop") -> tuple[list[d
         rows are discarded here, so only the small summary + metadata stay in memory (each .pt ~1GB).
 
     Raises:
-        KeyError: if the ablations don't record `accuracy_drop` (see plot_ablations' module docstring
-            -- you need to add accuracy scoring to intervention mode first).
+        KeyError: if the ablations don't record `accuracy_drop` (a file not written by main.py --intervention).
     """
     if not pt_path.exists() or pt_path.stat().st_size == 0:
         print(f"  [skip] {pt_path.name}: missing or empty (incomplete run)")
@@ -59,8 +58,7 @@ def load_ablations(pt_path: Path, metric: str = "accuracy_drop") -> tuple[list[d
         return None
     if loaded["ablations"] and "accuracy_drop" not in loaded["ablations"][0]:
         raise KeyError(
-            f"{pt_path.name}: ablations have no 'accuracy_drop'. Intervention mode must score "
-            "accuracy and store accuracy_drop per ablation -- see the plot_ablations module docstring."
+            f"{pt_path.name}: ablations have no 'accuracy_drop' -- was it written by src/main.py --intervention?"
         )
     summary = [
         {

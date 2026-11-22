@@ -16,9 +16,9 @@ class PromptDataset:
     `inference.run` iterates over `self.prompts`, a list of {"prompt": str, "metadata": dict}
     entries; that is the only interface the rest of the pipeline relies on. "prompt" is the string
     fed to the model; "metadata" is an optional free-form dict that can carry that prompt's ground truth
-    (e.g. the operands and correct answer) so you can score the model's output downstream. It's
-    passed straight through to each result row and never inspected by the pipeline, so put whatever
-    you need in it (or leave it empty).
+    (e.g. the operands and correct answer). It's passed straight through to each result row. The
+    pipeline reads only its "answer" (the correct answer as text), which scoring compares the model's
+    output against; everything else is yours.
     """
 
     def __init__(self) -> None:

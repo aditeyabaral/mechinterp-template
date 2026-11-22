@@ -16,8 +16,8 @@ same neuron sits at the same spot in every image and you can compare settings at
 
 WHAT "SURVIVING" MEANS: for each layer we take the accuracy_drop of every component that run ablated
 and keep only the ones in the top-p PERCENTILE (default 99; try 95 with --percentile if the surviving
-set is too sparse to see). accuracy_drop is baseline_accuracy - ablated_accuracy, so a survivor is a
-component the model leaned on heavily in that setting. EVERY neuron/head is drawn (all at the same
+set is too sparse to see) whose drop is above 0. accuracy_drop is baseline_accuracy - ablated_accuracy,
+so a survivor is a component the model leaned on heavily in that setting. EVERY neuron/head is drawn (all at the same
 size, so the whole population is visible); survivors are told apart by COLOUR (blue = MLP neuron,
 orange = attention head) against the grey non-survivors, which makes the SPARSITY of the circuit
 visible -- a few load-bearing components picked out against the full population.
@@ -47,7 +47,7 @@ from each file's saved metadata (via the shared loaders in src/utils/ablations.p
 --dir is used, labelled by its filename.
 
 WHAT YOU NEED FIRST: like src/analysis/plot_ablations.py, every ablation entry must carry an `accuracy_drop`
-(intervention mode records it via `is_correct` in src/main.py). If your prompts have no ground-truth
+(intervention mode records it in src/main.py). If your prompts have no ground-truth
 "answer" the drops are all 0, the percentile filter keeps nothing, and the circuit is empty. See the
 src/analysis/plot_ablations.py module docstring for the exact fields and how to add accuracy scoring.
 
@@ -107,7 +107,7 @@ def compute_survivors(ablations: list[dict[str, Any]], layers: list[int], percen
             accuracy_drop).
         layers: The layers to build survivor sets for, in column order.
         percentile: Keep components with accuracy_drop >= this percentile of the layer's drops
-            (e.g. 99 keeps the top 1%). Try 95 if the surviving set is too sparse.
+            (e.g. 99 keeps the top 1%), and above 0. Try 95 if the surviving set is too sparse.
 
     Returns:
         {layer_idx: set of surviving feature indices}. Layers with no ablated components map to an
@@ -124,7 +124,9 @@ def compute_survivors(ablations: list[dict[str, Any]], layers: list[int], percen
             survivors[layer] = set()
             continue
         threshold = float(np.percentile(np.array(list(neuron_drops.values())), percentile))
-        survivors[layer] = {feat for feat, drop in neuron_drops.items() if drop >= threshold}
+        # A survivor must also cost something when removed (drop > 0): when most drops in a layer are exactly 0,
+        # the percentile itself is 0 and would otherwise keep every component of the layer.
+        survivors[layer] = {feat for feat, drop in neuron_drops.items() if drop >= threshold and drop > 0}
     return survivors
 
 
@@ -472,6 +474,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output", "-o", default="plots", help="Directory to write the figures into.")
     parser.add_argument(
+        "--metric",
+        default="accuracy_drop",
+        help="Which drop to plot: accuracy_drop (whole answer, the default), mean_step_accuracy_drop (averaged "
+        "over the answer steps) or step:<name> for one step, e.g. step:step0 (the answer's first token) or "
+        "step:eos (stopping).",
+    )
+    parser.add_argument(
         "--percentile",
         "-p",
         type=float,
@@ -486,7 +495,7 @@ if __name__ == "__main__":
     if not settings:
         raise SystemExit(f"No .pt files found in {args.dir}.")
 
-    loaded = load_settings(settings)  # {label: (summary, metadata)}; skips non-intervention / empty files
+    loaded = load_settings(settings, args.metric)  # {label: (summary, metadata)}; skips non-intervention / empty files
     if not loaded:
         raise SystemExit(
             f"No usable intervention runs among {sorted(settings)} -- the .pt files may be incomplete or not "

@@ -1,7 +1,27 @@
-# Mechanistic Interpretability Template
+# MechInterpLens
 
-A starting point for **mechanistic interpretability** ("mechinterp") projects on small transformer
-models. The intended workflow is:
+Train a tiny transformer on a task you design, then find the neurons and attention heads that drive it. Built on [TransformerLens](https://github.com/TransformerLensOrg/TransformerLens).
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](pyproject.toml)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/aditeyabaral/MechInterpLens/blob/main/examples/quickstart.ipynb)
+
+![Accuracy drop when each MLP neuron of a toy addition model is switched off: only a handful of the 512 neurons matter](examples/img/heatmap_mlp.png)
+
+*A 2-layer model trained on single-digit addition. Each cell is how much accuracy drops when that MLP
+neuron is switched off: out of 512 neurons, only a handful matter.* **[Try it in Colab](https://colab.research.google.com/github/aditeyabaral/MechInterpLens/blob/main/examples/quickstart.ipynb)**
+— the whole workflow on that example, in a few minutes.
+
+**What you get:**
+- **Build the model:** a tokenizer, a leakage-checked dataset and a small GPT-2 trained on your task,
+  evaluated by exact match.
+- **Look inside it:** the activations of every neuron and head at each answer token, and sparse probes
+  that shortlist the ones that carry information.
+- **Test what it needs:** switch each component off (zero or mean ablation), measure the accuracy drop,
+  and draw the circuit of the ones that matter.
+
+MechInterpLens is a starting point for **mechanistic interpretability** ("mechinterp") projects on
+small transformer models. The intended workflow is:
 
 > [!NOTE]
 > **Pick a task → train a tiny ("toy") transformer on it from scratch → find which of its internal
@@ -126,8 +146,9 @@ definitions, just enough to follow along:
   activation has a stable *name* (like `blocks.5.mlp.hook_post`), so the same code works on any
   supported model.
 
-- **Ablation** — an intervention where we force some activations (a neuron or a head) to **zero** and
-  see if the output changes. If it does, that component mattered — this is our causal test.
+- **Ablation** — an intervention where we force some activations (a neuron or a head) to **zero** (or
+  to their average value) and see if the output changes. If it does, that component mattered — this
+  is our causal test.
 
 - **Logits** — the raw scores over the whole vocabulary that get turned into next-token probabilities.
 
@@ -162,9 +183,9 @@ Everything in this template is one of two operations on those components:
 
 - **Extraction (observe):** attach hooks that copy activations out. Changes nothing about the model —
   we're just watching.
-- **Ablation (intervene):** attach hooks that force chosen activations to zero, then watch how the
-  answer changes. This is the causal test that turns a correlation ("this neuron is active when…")
-  into evidence ("the model *needs* this neuron to…").
+- **Ablation (intervene):** attach hooks that force chosen activations to zero (or their average),
+  then watch how the answer changes. This is the causal test that turns a correlation ("this neuron
+  is active when…") into evidence ("the model *needs* this neuron to…").
 
 ## The pipeline at a glance
 
@@ -199,6 +220,7 @@ switches off every neuron and head, one at a time.
 This project uses [`uv`](https://docs.astral.sh/uv/) for dependency management.
 
 ```bash
+git clone https://github.com/aditeyabaral/MechInterpLens.git && cd MechInterpLens
 uv sync                       # create the virtual environment and install dependencies
 uv run python src/main.py -h  # check it works (prints the command-line options)
 uv run pre-commit install     # optional: lint and format your code on every commit
@@ -238,6 +260,11 @@ src/
     plot_ablations.py    #   heatmaps + cross-run scatter of ablation accuracy drops
     plot_circuits.py     #   circuit diagrams of the surviving components per setting
     split_half.py        #   did a sweep use enough prompts? (stability of its component ranking)
+scripts/
+  fill_example.py        # fills in the commented example task (used by the Colab notebook and CI)
+examples/
+  quickstart.ipynb       # the whole workflow on the example task (Open in Colab)
+  img/                   # figures used in this README
 ```
 
 The two files you'll spend the most time *reading* are **`inference.py`** (how activations are
@@ -359,6 +386,7 @@ prints the baseline accuracy. Useful options (`python src/main.py -h` lists them
 | `--capture-logits` | also save the logits that predict each answer token and the `<eos>` after it (they are big, and can be rebuilt from the last layer's residual stream) |
 | `--max-new-tokens` | how many tokens to generate per prompt (default: the longest answer plus one for `<eos>`) |
 | `--intervention FILE` | run an ablation sweep from a `lasso_shortlist.json`, or `all` for every neuron and head (step 7) |
+| `--ablation-type` | how the sweep switches a component off: `zero` (default) or `mean` |
 | `--batch-size` | prompts per forward pass in the teacher-forced sweep (default 256) |
 
 ### 6. Find the important components *(optional)*
@@ -405,6 +433,12 @@ instead of one per generated token per prompt. It also tells you **which step** 
 ablation breaks: each ablation records `step_accuracy_drop` per answer token (`step0`, `step1`, …)
 and for stopping (`eos`).
 
+**Zero or mean ablation.** By default a component is switched off by setting it to 0. In a tiny model
+that is often a value the component never takes, so removing almost anything can look harmful.
+`--ablation-type mean` sets it to its *average* value instead (over every token of every prompt and its
+answer), which removes only what the component says about *this* prompt — a gentler, often more
+telling test.
+
 To check you used enough prompts, run the **split-half check** on a sweep:
 `uv run python src/analysis/split_half.py <sweep .pt>`. It measures each component's drop on half the
 prompts and on the other half, and compares the two rankings. A value near 1 (for the "meaningful"
@@ -446,6 +480,8 @@ terminal:
 ```bash
 uv run python src/analysis/plot_circuits.py --dir <dir with your intervention .pt files> --output plots --percentile 99
 ```
+
+![Circuit diagram of the toy addition model: the few neurons and heads whose removal hurts, linked layer to layer](examples/img/circuit.png)
 
 Both plot scripts take `--metric` to choose which drop they show: `accuracy_drop` (the whole answer,
 the default), `mean_step_accuracy_drop` (averaged over the answer steps), or one step, e.g.

@@ -8,7 +8,7 @@ Loads a pre-built tokenizer (see train_tokenizer.py; TOKENIZER_NAME below can be
 local path such as "./artifacts/tokenizer" or an HF Hub repo ID) and trains on a
 dataset with "prompt" and "answer" columns (see create_dataset.py; DATASET_NAME can likewise
 be a local path such as "./artifacts/dataset" or an HF Hub repo ID). The dataset, its config and
-the tokenizer are saved in the model's config.json, so inference and analysis know what the model was
+the tokenizer are saved in the model's config.json, so anyone using the model knows what it was
 trained on, together with how it was trained ("training_args": every option of this script).
 
 Evaluation is done by greedy generation on the whole validation split. An answer is correct only if the
@@ -311,8 +311,7 @@ if __name__ == "__main__":
         attn_pdrop=0.0,
         summary_first_dropout=0.0,
     )
-    # Saved in config.json, so inference and analysis know what the model was trained on (src/main.py
-    # reads "dataset" from here to take its prompts from the same dataset). A resumed run must match it.
+    # Saved in config.json, so anyone using the model knows what it was trained on. A resumed run must match it.
     provenance = {
         "dataset": DATASET_NAME,
         "dataset_config": DATASET_CONFIG,

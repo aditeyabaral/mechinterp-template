@@ -1,8 +1,11 @@
 [project]
-name = "mechinterp-template"
+name = "MechInterpLens"
 version = "0.1.0"
-description = "A template for mechanistic interpretability projects on small transformer language models."
+description = "A starter template for mechanistic interpretability on small transformers: train a toy model on a task you design, then find the neurons and attention heads that drive it."
+keywords = ["mechanistic interpretability", "interpretability", "transformerlens", "transformers", "ablation", "gpt-2", "pytorch"]
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "accelerate>=1.11.0",
@@ -24,6 +27,9 @@ dependencies = [
     "rich>=14.3.3",
     "transformer-lens>=3.2.1",
 ]
+
+[project.urls]
+Repository = "https://github.com/aditeyabaral/MechInterpLens"
 
 # Dev tools, pinned so the pre-commit hook, CI and your editor all run the same ruff.
 # Installed by `uv sync` (uv installs the "dev" group by default).

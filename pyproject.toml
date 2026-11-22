@@ -2,7 +2,7 @@
 name = "MechInterpLens"
 version = "0.1.0"
 description = "A starter template for mechanistic interpretability on small transformers: train a toy model on a task you design, then find the neurons and attention heads that drive it."
-keywords = ["mechanistic interpretability", "interpretability", "transformerlens", "transformers", "ablation", "gpt-2", "pytorch"]
+keywords = ["mechanistic interpretability", "interpretability", "transformerlens", "transformers", "gpt-2", "pytorch"]
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

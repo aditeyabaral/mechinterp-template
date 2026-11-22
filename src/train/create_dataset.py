@@ -9,7 +9,7 @@ Each row must contain at least a "prompt" and an "answer" column; add any extra 
 columns your training/eval needs. What the splits are for:
   - train:      what the model learns from.
   - validation: scored during training to pick the best checkpoint (src/train/train_model.py),
-                and a source of held-out prompts for the analysis (src/main.py --split validation).
+                and a good source of held-out prompts for the analysis (src/utils/dataset.py).
 
 A leakage-safe recipe to follow inside `build_dataset` (strongly recommended):
   1. Enumerate every atomic "item" your questions are built from (e.g. each (a, b)

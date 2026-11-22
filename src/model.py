@@ -38,6 +38,13 @@ This file is generic infrastructure -- you normally will NOT need to edit it.
 
 import torch
 from transformer_lens.model_bridge import TransformerBridge
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+
+def _tokenizer_adds_bos(tokenizer: PreTrainedTokenizerBase) -> bool:
+    """Whether the tokenizer puts a BOS token at the start of every text it encodes."""
+    ids = tokenizer("x")["input_ids"]
+    return tokenizer.bos_token_id is not None and len(ids) > 0 and ids[0] == tokenizer.bos_token_id
 
 
 def load_model(model_path: str, device: torch.device | str | None = None) -> TransformerBridge:
@@ -71,4 +78,8 @@ def load_model(model_path: str, device: torch.device | str | None = None) -> Tra
     # We pass the device through; everything else (config, sizes) is inferred from the checkpoint.
     model = TransformerBridge.boot_transformers(model_path, device=str(device))
     model.eval()  # inference mode: disable dropout etc. (we never train during analysis)
+
+    # TransformerLens prepends a BOS token by default; add one only if the model's own tokenizer does,
+    # so prompts are tokenized as in training.
+    model.cfg.default_prepend_bos = _tokenizer_adds_bos(AutoTokenizer.from_pretrained(model_path))
     return model

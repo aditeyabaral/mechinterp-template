@@ -44,8 +44,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         required=False,
         default=None,
         help="Maximum number of new tokens to generate. Defaults to the longest ground-truth answer (in "
-        "tokens) plus one for <eos>, or 16 if the prompts carry no 'answer'. Keep it small: an ablated "
-        "model can ramble, and every prompt then generates up to this many tokens.",
+        "tokens) plus one for <eos>, or 16 if the prompts carry no 'answer'.",
     )
     parser.add_argument(
         "--output",

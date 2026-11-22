@@ -9,20 +9,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
         with:
             ref: ${{ github.head_ref }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
+      - uses: astral-sh/setup-uv@v10.4.0
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install "ruff>=0.14.4"
-          pip install "pre-commit>=4.4.0"
+      - name: Install tools from pyproject.toml and uv.lock
+        run: uv sync --frozen --only-group dev
 
       - name: Run pre-commit hooks
-        run: pre-commit run --all-files
+        run: uv run --frozen --only-group dev pre-commit run --all-files

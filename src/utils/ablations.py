@@ -21,8 +21,11 @@ def _metric_value(entry: dict[str, Any], metric: str) -> float:
     run's metadata["step_names"] (e.g. "step:step0" for the answer's first token, "step:eos" for
     stopping), NaN if no prompt has that step.
     """
-    if metric in ("accuracy_drop", "mean_step_accuracy_drop"):
+    if metric == "accuracy_drop":
         return float(entry[metric])
+    if metric == "mean_step_accuracy_drop":
+        drops = entry["step_accuracy_drop"]
+        return sum(drops.values()) / len(drops)
     if metric.startswith("step:"):
         return float(entry["step_accuracy_drop"].get(metric[len("step:") :], float("nan")))
     raise ValueError(f"Unknown metric {metric!r}: use accuracy_drop, mean_step_accuracy_drop or step:<name>")

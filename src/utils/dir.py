@@ -28,7 +28,7 @@ def generate_output_path(args: argparse.Namespace) -> str:
     model_name = str(args.model_path).replace("/", "--")
     intervention = args.intervention
     if intervention is not None and intervention != "all":
-        intervention = Path(intervention).stem  # e.g. "analysis" for analysis.json
+        intervention = Path(intervention).stem  # e.g. "lasso_shortlist" for lasso_shortlist.json
     components = [
         f"[m={model_name}]",
         f"[p={args.num_prompts}]",

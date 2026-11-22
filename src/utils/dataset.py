@@ -52,8 +52,9 @@ class PromptDataset:
         # WHAT metadata is for:
         #   A free-form dict of that prompt's ground truth (e.g. {"a": 7, "b": 5, "answer": "12"}).
         #   It's copied verbatim onto the result row, so downstream code (scoring, lasso.py) can
-        #   compare the model's output against the truth. The pipeline never reads it -- use {} if
-        #   you don't need it.
+        #   compare the model's output against the truth. The pipeline itself reads only "answer"
+        #   (the correct answer as text): baseline accuracy and the ablation sweep are
+        #   scored against it, and the sweep needs it on every prompt. Everything else is yours.
         #
         # FEW-SHOT prompting (used in the example below):
         #   Small models follow patterns better when you first show a few solved examples
@@ -63,6 +64,10 @@ class PromptDataset:
         # TIPS:
         #   - Keep answers short (ideally one or two tokens) so the analysis is clean.
         #   - Use a fixed random seed (main.py already seeds RNGs) so runs are reproducible.
+        #   - For a model you trained yourself, prefer questions it never trained on: a model is
+        #     easiest to study on questions it has learned to GENERALISE to, not ones it may have
+        #     memorised. One way is to load your dataset's validation split (datasets.load_dataset)
+        #     and turn its rows into prompts.
         #   - If your task needs extra knobs (operator, number of shots, digit count, ...), add
         #     them as CLI arguments in src/utils/parser.py and as parameters to this method,
         #     then pass them through from src/main.py.

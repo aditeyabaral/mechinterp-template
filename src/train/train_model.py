@@ -40,6 +40,7 @@ from transformers import (
     Trainer,
     TrainingArguments,
 )
+from transformers.utils import is_torch_bf16_gpu_available
 
 # The rule for a correct answer, shared with inference and analysis (src/train/scoring.py, next to this file).
 from scoring import is_correct
@@ -275,10 +276,8 @@ if __name__ == "__main__":
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cuda_available = torch.cuda.is_available()
+    mps_available = torch.backends.mps.is_available()
 
     # Tokenizer
     print(f"Loading tokenizer from '{TOKENIZER_NAME}'...")
@@ -330,14 +329,10 @@ if __name__ == "__main__":
         config = model.config
         config.update(provenance)
         print(f"\nInitialized weights from {args.init_from}")
-    model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
 
-    print(f"\nDevice: {device}")
-    print(f"Seed:   {args.seed}\n")
-
-    print("Model Configuration:")
+    print("\nModel Configuration:")
     print(f"  vocab_size:    {config.vocab_size}")
     print(f"  n_embd:        {config.n_embd}")
     print(f"  n_inner:       {config.n_inner}")
@@ -392,9 +387,7 @@ if __name__ == "__main__":
     # so padding is ignored by the loss.
     collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, label_pad_token_id=-100)
 
-    cuda_available = torch.cuda.is_available()
-    supports_bf16 = cuda_available and torch.cuda.get_device_capability()[0] >= 8
-    print(f"\nCUDA available: {cuda_available}\nSupports bf16: {supports_bf16}")
+    supports_bf16 = is_torch_bf16_gpu_available()
     training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.num_epochs,
@@ -434,6 +427,10 @@ if __name__ == "__main__":
         run_name=args.run_name if args.run_name is not None else (hub_name.split("/")[-1] if hub_name else None),
         bf16=supports_bf16,
     )
+    device = training_args.device  # Trainer places the model on this device.
+    print(f"\nDevice: {device}")
+    print(f"Seed: {args.seed}")
+    print(f"CUDA available: {cuda_available}\nMPS available: {mps_available}\nSupports bf16: {supports_bf16}")
 
     trainer = GenerationEvalTrainer(
         model=model,

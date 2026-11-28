@@ -98,7 +98,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=256,
         help="Sequences per forward pass in the teacher-forced ablation sweep. Defaults to 256; lower it "
-        "if you run out of GPU memory.",
+        "if you run out of memory.",
     )
 
     # ----------------------------------------------------------------------- #

@@ -26,6 +26,9 @@ Each prompt carries a `metadata` dict with its ground truth; put the correct ans
 uv run python src/main.py -m <user>/my-model --num-prompts 200 --capture-activations
 ```
 
+Capture and ablation both use the model's device, selected automatically in the order CUDA,
+Apple Metal (MPS), then CPU. `src/main.py` prints the device and records it in the output metadata.
+
 This runs your model on each prompt, records the activations at every answer token, and saves a
 `.pt` file in the current directory (its name is generated automatically from every run parameter, so
 different runs never overwrite each other; pass `--output FILE.pt` to choose it yourself). It also

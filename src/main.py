@@ -63,17 +63,15 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
-    # 2. Seed every RNG so a run is reproducible (same seed -> same prompts and same outputs).
+    # 2. Seed Python, NumPy, and PyTorch, including its CUDA and MPS generators.
     random.seed(args.seed)
-    torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    torch.manual_seed(args.seed)
 
     # 3. Load the model into a TransformerLens bridge (works for real gpt2 AND a toy model you
     #    trained from scratch -- just point --model-path at a Hub repo or local directory).
-    model = load_model(args.model_path, device)
+    model = load_model(args.model_path)
+    print(f"Device: {model.cfg.device}")
 
     # 4. Choose which decoder layers to capture from (--layers; None = all of them).
     layers = args.layers if args.layers else list(range(model.cfg.n_layers))
@@ -115,6 +113,7 @@ if __name__ == "__main__":
     # Every run parameter, saved with the results so a .pt file always says how it was made.
     run_metadata = {
         "model_path": args.model_path,
+        "device": str(model.cfg.device),
         "num_prompts": len(dataset),
         "num_layers": len(layers),
         "layer_indices": layers,

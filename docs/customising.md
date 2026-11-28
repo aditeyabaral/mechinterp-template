@@ -37,13 +37,13 @@ example in place, so run it **in a copy** of the repository, not the one you'll 
 - **Keep answers short** (one or two tokens). Long, variable answers make "the answer position" fuzzy
   and the analysis noisier.
 - **Start with a tiny model.** Fewer layers and heads means fewer things to understand.
-- **Reproducibility is built in:** `main.py` seeds all RNGs from `--seed`, so reruns are identical.
+- **Set `--seed` for repeatable runs.** `main.py` seeds prompt sampling and PyTorch. Numerical
+  results can vary across devices.
 - **Prompts are tokenized exactly as in training.** TransformerLens normally puts a BOS token in front
   of every prompt, even for models that never saw one, which shifts every position and can change the
   answers. `load_model` (`src/model.py`) instead adds a BOS only if your tokenizer does. So when you
   count token positions (e.g. in `find_positions_of_interest`), count them as
   `model.to_str_tokens(prompt)` shows them.
-- **GPU vs CPU:** the model is placed automatically; everything also runs on CPU, just slower.
 - **Lint like CI does.** `uv sync` also installs the pinned dev tools (`ruff`, `pre-commit`), so your
   editor, the pre-commit hook and CI all run the same `ruff` version. `uv run pre-commit install`
   runs them on every commit.

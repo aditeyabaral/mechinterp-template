@@ -40,6 +40,9 @@ uv sync                       # create the virtual environment and install depen
 uv run python src/main.py -h  # check it works (prints the command-line options)
 ```
 
+Training, activation capture, and ablation sweeps automatically use CUDA or Apple Metal (MPS)
+when available, with CPU as the fallback. Each command prints the device it selected.
+
 Then fill in the `TODO`s for your task and follow the workflow below. To try the example task
 locally instead, run `uv run python scripts/fill_example.py .` **in a copy** of the repository (it
 edits the files in place). Everything is saved locally by default; to also push to the Hugging Face

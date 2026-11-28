@@ -60,8 +60,8 @@ def load_model(model_path: str, device: torch.device | str | None = None) -> Tra
 
     Args:
         model_path: HuggingFace Hub repo id or local directory of the model to load.
-        device: Where to place the model ("cuda", "cpu", or a torch.device). Defaults to CUDA
-            if available, else CPU.
+        device: Where to place the model ("cuda", "mps", "cpu", or a torch.device). Defaults to CUDA,
+            then Apple Metal (MPS), then CPU.
 
     Returns:
         A TransformerBridge in eval mode. Use it with:
@@ -72,7 +72,7 @@ def load_model(model_path: str, device: torch.device | str | None = None) -> Tra
         Its model.cfg exposes n_layers, n_heads, d_head, d_model, etc.
     """
     if device is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
     # boot_transformers loads the HF model + tokenizer and wraps them in the TL hook interface.
     # We pass the device through; everything else (config, sizes) is inferred from the checkpoint.

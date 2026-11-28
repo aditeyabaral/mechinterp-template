@@ -30,9 +30,9 @@ whitespace-delimited chunk of that text; override it for your task.
 
 ## What a capture run saves
 
-A run **with `--capture-activations`** saves a dictionary like this (tensors are PyTorch tensors on the
-CPU). The shapes shown are GPT-2's; a toy model you trained will have whatever sizes you configured
-(e.g. a `[256]` residual instead of `[768]`):
+A run **with `--capture-activations`** saves a dictionary like this. Tensors are stored on CPU even
+when the model runs on CUDA or MPS. The shapes shown are GPT-2's. Your model uses the sizes you
+configured (e.g. a `[256]` residual instead of `[768]`).
 
 ```python
 {
@@ -68,7 +68,7 @@ CPU). The shapes shown are GPT-2's; a toy model you trained will have whatever s
     },
     ...
   ],
-  "metadata": { "model_path": "...", "layer_indices": [...], "num_attention_heads": 12, ... },
+  "metadata": { "model_path": "...", "device": "mps", "layer_indices": [...], "num_attention_heads": 12, ... },
 }
 ```
 
